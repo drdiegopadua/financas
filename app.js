@@ -360,8 +360,8 @@ function viewDash() {
 
   const unpaid = s.exps.filter(x => !x.paid);
   out += `<h2>Contas a pagar <button class="add-btn" data-act="newexp"><i>+</i>Adicionar</button></h2>`;
-  out += unpaid.length ? `<div class="bills">${unpaid.slice(0, 6).map(billCard).join('')}</div>${unpaid.length > 6 ? `<p class="muted" style="text-align:center">+${unpaid.length - 6} — veja em Despesas</p>` : ''}`
-    : `<div class="glass"><div class="empty"><b>✅</b>${s.exps.length ? 'Tudo pago neste mês!' : 'Nenhuma conta neste mês'}</div></div>`;
+  out += `<section class="sheet">${unpaid.length ? unpaid.slice(0, 6).map(despRow).join('') : `<div class="empty"><b>✅</b>${s.exps.length ? 'Tudo pago neste mês!' : 'Nenhuma conta neste mês'}</div>`}
+    ${unpaid.length > 6 ? `<div class="row" data-tab-go="desp" role="button" style="justify-content:center;font-weight:600">Ver mais ${unpaid.length - 6} em Despesas ›</div>` : ''}</section>`;
 
   out += `<h2>Painel</h2><div class="glass">`;
   const pts = Array.from({ length: 6 }, (_, i) => { const m = addMonths(state.ym, i - 2); return { v: summary(m).sobra, label: ymLabel(m).split('/')[0], sub: `sobra ${ymLabel(m)}` }; });
