@@ -1085,6 +1085,10 @@ $('#view').addEventListener('change', e => {
   db.settings[s.dataset.setting] = Number(s.value); db.notified = {}; save(); render(); toast('Preferência salva');
 });
 
+/* ---------- sem zoom com os dedos (o iPhone ignora user-scalable=no) ---------- */
+['gesturestart', 'gesturechange', 'gestureend'].forEach(ev => document.addEventListener(ev, e => e.preventDefault(), { passive: false }));
+document.addEventListener('touchmove', e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
+
 /* ---------- PWA ---------- */
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; if (state.tab === 'cfg') render(); });
