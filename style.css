@@ -6,8 +6,9 @@
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 /* sem zoom: bloqueia duplo toque e pinça; campos com 16px não disparam zoom automático no iPhone */
-html,body{touch-action:pan-x pan-y;-webkit-text-size-adjust:100%;text-size-adjust:100%}
-button,a,input,select,textarea,label{touch-action:manipulation}
+html,body{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+/* touch-action não é herdado: aplica em tudo (inclusive no modal, que tem rolagem própria) */
+*,*::before,*::after{touch-action:pan-x pan-y}
 input,select,textarea{font-size:16px!important}
 html{background:#16294a}
 body{margin:0;min-height:100vh;color:var(--text);font:14px/1.45 Poppins,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;

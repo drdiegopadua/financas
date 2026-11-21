@@ -2,7 +2,7 @@
 'use strict';
 
 const KEY = 'financas.v1';
-const APP_VERSION = '10';
+const APP_VERSION = '11';
 const DEFAULT_CATS = [
   { id: 'moradia', name: 'Moradia', icon: '🏠', color: '#60a5fa' },
   { id: 'alimentacao', name: 'Alimentação', icon: '🍽️', color: '#f97316' },
@@ -1089,7 +1089,8 @@ $('#view').addEventListener('change', e => {
 /* ---------- sem zoom com os dedos (o iPhone ignora user-scalable=no) ---------- */
 document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
 ['gesturestart', 'gesturechange', 'gestureend'].forEach(ev => document.addEventListener(ev, e => e.preventDefault(), { passive: false }));
-document.addEventListener('touchmove', e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
+// no iPhone a pinça começa no toque com 2 dedos: cancela já no início e durante o movimento
+['touchstart', 'touchmove'].forEach(ev => document.addEventListener(ev, e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false, capture: true }));
 
 /* ---------- PWA ---------- */
 let deferredInstall = null;
