@@ -16,20 +16,26 @@ const DEFAULT_CATS = [
   { id: 'impostos', name: 'Impostos', icon: '🧾', color: '#94a3b8' },
   { id: 'outros', name: 'Outros', icon: '📦', color: '#64748b' },
 ];
+const DEFAULT_SETTINGS = { notify: false, daysBefore: 1 };
 
 /* ---------- dados ---------- */
+function fresh() {
+  return { expenses: [], incomes: [], receivables: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), settings: { ...DEFAULT_SETTINGS }, notified: {} };
+}
+function normalize(d) {
+  const db = Object.assign(fresh(), d);
+  db.settings = Object.assign({ ...DEFAULT_SETTINGS }, db.settings);
+  db.notified = db.notified || {};
+  return db;
+}
 function load() {
-  const base = { expenses: [], incomes: [], receivables: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)) };
-  try {
-    const d = JSON.parse(localStorage.getItem(KEY));
-    if (d && typeof d === 'object') return Object.assign(base, d);
-  } catch (e) { /* ignora */ }
-  return base;
+  try { const d = JSON.parse(localStorage.getItem(KEY)); if (d && typeof d === 'object') return normalize(d); } catch (e) { /* ignora */ }
+  return fresh();
 }
 let db = load();
 function save() {
-  try { localStorage.setItem(KEY, JSON.stringify(db)); }
-  catch (e) { toast('Não foi possível salvar'); }
+  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { toast('Não foi possível salvar'); }
+  syncReminders();
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -38,11 +44,16 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const money = v => brl.format(v || 0);
+const brl0 = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 });
+const money0 = v => brl0.format(v || 0);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const cents = v => Math.round((Number(v) || 0) * 100);
 
 const pad = n => String(n).padStart(2, '0');
-const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const today = () => iso(new Date());
+const addDays = (date, n) => { const [y, m, d] = date.split('-').map(Number); return iso(new Date(y, m - 1, d + n)); };
+const daysBetween = (a, b) => Math.round((new Date(b + 'T12:00') - new Date(a + 'T12:00')) / 864e5);
 const ymOf = date => date.slice(0, 7);
 const curYM = () => ymOf(today());
 function addMonths(ym, n) {
@@ -50,20 +61,21 @@ function addMonths(ym, n) {
   m += n; y += Math.floor((m - 1) / 12); m = ((m - 1) % 12 + 12) % 12 + 1;
   return `${y}-${pad(m)}`;
 }
-function diffMonths(a, b) { // a - b
-  const [ya, ma] = a.split('-').map(Number), [yb, mb] = b.split('-').map(Number);
-  return (ya - yb) * 12 + (ma - mb);
-}
-function dateIn(ym, day) { // mesmo dia em outro mês (ajusta fim de mês)
-  const [y, m] = ym.split('-').map(Number);
-  const last = new Date(y, m, 0).getDate();
-  return `${ym}-${pad(Math.min(day, last))}`;
-}
+function diffMonths(a, b) { const [ya, ma] = a.split('-').map(Number), [yb, mb] = b.split('-').map(Number); return (ya - yb) * 12 + (ma - mb); }
+function dateIn(ym, day) { const [y, m] = ym.split('-').map(Number); return `${ym}-${pad(Math.min(day, new Date(y, m, 0).getDate()))}`; }
 const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 const MESES_L = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
 const ymLabel = (ym, long) => { const [y, m] = ym.split('-').map(Number); return long ? `${MESES_L[m - 1]} ${y}` : `${MESES[m - 1]}/${String(y).slice(2)}`; };
 const fmtDate = d => d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}` : '';
+const fmtDM = d => d ? `${Number(d.slice(8, 10))} ${MESES[Number(d.slice(5, 7)) - 1]}` : '';
 const cat = id => db.cats.find(c => c.id === id) || { id, name: 'Sem categoria', icon: '❔', color: '#64748b' };
+function whenTxt(date) {
+  const d = daysBetween(today(), date);
+  if (d === 0) return 'vence hoje';
+  if (d === 1) return 'vence amanhã';
+  if (d > 1) return `vence em ${d} dias`;
+  return d === -1 ? 'venceu ontem' : `venceu há ${-d} dias`;
+}
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -71,14 +83,18 @@ function toast(msg) {
 }
 
 /* ---------- regras de negócio ---------- */
-// valor de cada parcela (em centavos), sobra do arredondamento vai na última
 function installmentValue(e, k) {
   if (e.mode !== 'parcelada') return cents(e.amount);
   const total = cents(e.amount), n = e.n || 1, base = Math.floor(total / n);
   return k === n - 1 ? total - base * (n - 1) : base;
 }
+// data em que foi paga (string) ou '' se a data não foi registrada; undefined se não paga
+function paidInfo(e, ym) {
+  const v = e.paid && e.paid[ym];
+  if (!v) return undefined;
+  return typeof v === 'string' ? v : '';
+}
 
-// todas as ocorrências de despesas em um mês
 function expensesIn(ym) {
   const out = [];
   for (const e of db.expenses) {
@@ -88,12 +104,11 @@ function expensesIn(ym) {
     else if (e.mode === 'parcelada') ok = k >= 0 && k < (e.n || 1);
     else if (e.mode === 'fixa') ok = k >= 0 && (!e.end || ym <= e.end);
     if (!ok) continue;
-    out.push({ e, k, ym, value: installmentValue(e, k) / 100, date: dateIn(ym, day), paid: !!(e.paid && e.paid[ym]) });
+    const pi = paidInfo(e, ym);
+    out.push({ e, k, ym, value: installmentValue(e, k) / 100, date: dateIn(ym, day), paid: pi !== undefined, paidAt: pi || '' });
   }
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
-
-// entradas (renda) de um mês + valores a receber que foram recebidos no mês
 function incomesIn(ym) {
   const out = [];
   for (const i of db.incomes) {
@@ -108,69 +123,250 @@ const receivedIn = ym => db.receivables.filter(r => r.received && r.receivedAt &
 function summary(ym) {
   const exps = expensesIn(ym), incs = incomesIn(ym), recs = receivedIn(ym);
   const sum = (arr, f) => arr.reduce((s, x) => s + cents(f(x)), 0) / 100;
-  const despesas = sum(exps, x => x.value);
-  const pago = sum(exps.filter(x => x.paid), x => x.value);
-  const renda = sum(incs, x => x.value);
-  const recebido = sum(recs, x => x.amount);
-  const entradas = renda + recebido;
+  const despesas = sum(exps, x => x.value), pago = sum(exps.filter(x => x.paid), x => x.value);
+  const renda = sum(incs, x => x.value), recebido = sum(recs, x => x.amount), entradas = renda + recebido;
   const byCat = {};
   for (const x of exps) byCat[x.e.cat] = (byCat[x.e.cat] || 0) + x.value;
   return { exps, incs, recs, despesas, pago, aPagar: despesas - pago, renda, recebido, entradas, sobra: entradas - despesas, byCat };
 }
 
-/* ---------- estado de navegação ---------- */
-const state = { tab: 'dash', ym: curYM(), catFilter: null, recFilter: 'pend' };
+// contas não pagas que vencem até (hoje + dias de antecedência), incluindo atrasadas dos últimos 6 meses
+function dueAlerts() {
+  const limit = addDays(today(), Number(db.settings.daysBefore) || 0), out = [];
+  // ignora meses anteriores ao cadastro (já estavam pagos antes de usar o app)
+  for (let i = -6; i <= 1; i++) for (const x of expensesIn(addMonths(curYM(), i))) if (!x.paid && x.date <= limit && !(x.e.created && x.ym < ymOf(x.e.created))) out.push(x);
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+const recAlerts = () => db.receivables.filter(r => !r.received && r.due && r.due <= today());
 
-/* ---------- renderização ---------- */
+/* ---------- lembretes / notificações ---------- */
+async function swReg() { return 'serviceWorker' in navigator ? navigator.serviceWorker.getRegistration() : null; }
+
+async function notifyDue() {
+  if (!db.settings.notify || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const t = today(), pend = dueAlerts().filter(x => db.notified[`${x.e.id}|${x.ym}`] !== t);
+  if (!pend.length) return;
+  const reg = await swReg();
+  const show = (title, opts) => reg ? reg.showNotification(title, opts) : new Notification(title, opts);
+  const base = { icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url: './' } };
+  if (pend.length > 3) {
+    const tot = pend.reduce((a, x) => a + x.value, 0);
+    show(`💸 ${pend.length} contas para pagar`, { ...base, tag: 'resumo', body: `Total ${money(tot)} — ${pend.slice(0, 3).map(x => x.e.desc).join(', ')}…` });
+  } else {
+    for (const x of pend) show(`💸 ${x.e.desc} — ${money(x.value)}`, { ...base, tag: `${x.e.id}|${x.ym}`, body: `${whenTxt(x.date)} (${fmtDate(x.date)}). Toque para marcar como paga.` });
+  }
+  pend.forEach(x => { db.notified[`${x.e.id}|${x.ym}`] = t; });
+  for (const k in db.notified) if (db.notified[k] < addDays(t, -40)) delete db.notified[k];
+  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { /* ignora */ }
+}
+
+// guarda a lista de próximas contas para o service worker avisar em segundo plano (Android/Chrome)
+async function syncReminders() {
+  updateBell();
+  if (!('caches' in window)) return;
+  const items = [];
+  for (let i = -2; i <= 2; i++) for (const x of expensesIn(addMonths(curYM(), i))) if (!x.paid) items.push({ key: `${x.e.id}|${x.ym}`, desc: x.e.desc, value: money(x.value), date: x.date });
+  try {
+    const c = await caches.open('financas-data');
+    await c.put('reminders.json', new Response(JSON.stringify({ notify: db.settings.notify, daysBefore: Number(db.settings.daysBefore) || 0, items }), { headers: { 'Content-Type': 'application/json' } }));
+  } catch (e) { /* ignora */ }
+}
+
+async function enableNotifications() {
+  if (!('Notification' in window)) { toast('Este navegador não suporta avisos'); return false; }
+  const p = await Notification.requestPermission();
+  if (p !== 'granted') { toast('Permissão de aviso negada'); return false; }
+  db.settings.notify = true; save();
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (reg.periodicSync) await reg.periodicSync.register('check-bills', { minInterval: 12 * 3600 * 1000 });
+  } catch (e) { /* nem todo navegador permite */ }
+  notifyDue();
+  toast('Lembretes ativados 🔔');
+  return true;
+}
+
+function exportICS() {
+  const d = Number(db.settings.daysBefore) || 0, now = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const trig = d === 0 ? 'PT9H' : `-PT${d * 24 - 9}H`;
+  const escI = s => String(s).replace(/[\\;,]/g, m => '\\' + m).replace(/\n/g, '\\n');
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Minhas Financas//PT-BR', 'CALSCALE:GREGORIAN', 'X-WR-CALNAME:Contas a pagar'];
+  let n = 0;
+  for (let i = 0; i < 12; i++) for (const x of expensesIn(addMonths(curYM(), i))) {
+    if (x.paid || x.date < today()) continue;
+    const ds = x.date.replace(/-/g, ''), de = addDays(x.date, 1).replace(/-/g, '');
+    const parc = x.e.mode === 'parcelada' ? ` (${x.k + 1}/${x.e.n})` : '';
+    lines.push('BEGIN:VEVENT', `UID:${x.e.id}-${x.ym}@minhas-financas`, `DTSTAMP:${now}`, `DTSTART;VALUE=DATE:${ds}`, `DTEND;VALUE=DATE:${de}`,
+      `SUMMARY:${escI(`💸 Pagar ${x.e.desc}${parc} - ${money(x.value)}`)}`, `DESCRIPTION:${escI(`${cat(x.e.cat).name} · ${money(x.value)}`)}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${escI(`Pagar ${x.e.desc} - ${money(x.value)}`)}`, `TRIGGER:${trig}`, 'END:VALARM', 'END:VEVENT');
+    n++;
+  }
+  lines.push('END:VCALENDAR');
+  if (!n) return toast('Nenhuma conta futura em aberto');
+  download(new Blob([lines.join('\r\n')], { type: 'text/calendar' }), 'contas-a-pagar.ics');
+  toast(`${n} lembretes exportados`);
+}
+function download(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
+
+function updateBell() {
+  const n = dueAlerts().length + recAlerts().length, b = $('#bellBadge');
+  b.hidden = !n; b.textContent = n > 9 ? '9+' : n;
+}
+
+/* ---------- estado ---------- */
+const state = { tab: 'dash', ym: curYM(), catFilter: null, recFilter: 'pend', despFilter: 'all' };
+
+/* ---------- componentes ---------- */
+function setPaid(e, ym, on, date) {
+  e.paid = e.paid || {};
+  if (on) e.paid[ym] = date || today(); else delete e.paid[ym];
+}
+
+function billCard(x) {
+  const c = cat(x.e.cat), late = !x.paid && x.date < today();
+  const parc = x.e.mode === 'parcelada' ? ` · ${x.k + 1}/${x.e.n}` : x.e.mode === 'fixa' ? ' · fixa' : '';
+  return `<div class="bill ${x.paid ? 'paid' : ''} ${late ? 'late' : ''}" data-edit-exp="${x.e.id}" data-ym="${x.ym}" role="button">
+    <div class="top"><div class="ic" style="color:${c.color}">${c.icon}</div>
+      <button class="chk ${x.paid ? 'on' : ''}" data-pay="${x.e.id}" data-ym="${x.ym}" aria-label="${x.paid ? 'Desmarcar pagamento' : 'Marcar como paga'}">✓</button></div>
+    <div class="t">${esc(x.e.desc)}</div>
+    <div class="sub" style="font-size:11px;color:var(--ink2)">${esc(c.name)}${parc}</div>
+    <div class="ft"><span>${x.paid ? `Pago ${x.paidAt ? fmtDM(x.paidAt) : ''}` : late ? `Venceu ${fmtDM(x.date)}` : fmtDM(x.date)}</span><b>${money(x.value)}</b></div>
+  </div>`;
+}
+
+function expRow(x) {
+  const c = cat(x.e.cat), late = !x.paid && x.date < today(), soon = !x.paid && !late && daysBetween(today(), x.date) <= (Number(db.settings.daysBefore) || 0);
+  return `<div class="row ${x.paid ? 'done' : ''}" data-edit-exp="${x.e.id}" data-ym="${x.ym}">
+    <div class="ic" style="color:${c.color}">${c.icon}</div>
+    <div class="mid"><div class="t">${esc(x.e.desc)}</div>
+      <div class="sub">${x.paid ? `<span class="tag ok">pago ${x.paidAt ? fmtDate(x.paidAt) : ''}</span>` : `<span class="tag ${late ? 'late' : soon ? 'soon' : ''}">${whenTxt(x.date)}</span>`}<span>${money(x.value)}</span></div></div>
+    ${x.paid ? `<button class="pay ok" data-pay="${x.e.id}" data-ym="${x.ym}">✓ Pago</button>` : `<button class="pay" data-pay="${x.e.id}" data-ym="${x.ym}">Pagar</button>`}
+  </div>`;
+}
+
+function recRow(r) {
+  const late = !r.received && r.due && r.due < today();
+  return `<div class="row ${r.received ? 'done' : ''}" data-edit-rec="${r.id}">
+    <div class="ic">🤝</div>
+    <div class="mid"><div class="t">${esc(r.who || r.desc)}</div>
+      <div class="sub">${r.who ? `<span>${esc(r.desc)}</span>` : ''}${r.received ? `<span class="tag ok">recebido ${fmtDate(r.receivedAt)}</span>` : r.due ? `<span class="tag ${late ? 'late' : ''}">${late ? 'atrasado · ' : ''}${fmtDate(r.due)}</span>` : ''}</div></div>
+    <div class="amt">${money(r.amount)} <span class="arrow-dn">↙</span></div>
+    ${r.received ? '' : `<button class="pay recv" data-recv="${r.id}">Recebi</button>`}
+  </div>`;
+}
+
+function lineChart(points, sel) {
+  const W = 320, H = 170, L = 38, R = 8, T = 34, B = 24;
+  const vals = points.map(p => p.v);
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (min === max) { min -= 100; max += 100; }
+  const padv = (max - min) * .15; min -= padv; max += padv;
+  const X = i => L + i * (W - L - R) / (points.length - 1), Y = v => T + (max - v) / (max - min) * (H - T - B);
+  const pts = points.map((p, i) => [X(i), Y(p.v)]);
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    d += ` C${p1[0] + (p2[0] - p0[0]) / 6},${p1[1] + (p2[1] - p0[1]) / 6} ${p2[0] - (p3[0] - p1[0]) / 6},${p2[1] - (p3[1] - p1[1]) / 6} ${p2[0]},${p2[1]}`;
+  }
+  const ticks = [0, 1, 2, 3].map(i => min + (max - min) * (i + .5) / 4);
+  const zero = min < 0 && max > 0 ? `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="rgba(255,120,120,.5)" stroke-dasharray="2 4"/>` : '';
+  const [sx, sy] = pts[sel];
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Sobra por mês">
+    <defs><linearGradient id="ar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>
+    ${ticks.map(t => `<text x="0" y="${Y(t) + 3}" fill="#a9bad3" font-size="9">${compact(t)}</text>`).join('')}
+    ${zero}
+    <line x1="${L}" x2="${W - R}" y1="${sy}" y2="${sy}" stroke="rgba(255,255,255,.35)" stroke-dasharray="3 4"/>
+    <path d="${d} L${pts.at(-1)[0]},${H - B} L${pts[0][0]},${H - B} Z" fill="url(#ar)"/>
+    <path d="${d}" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>
+    <line x1="${sx}" x2="${sx}" y1="${sy}" y2="${H - B}" stroke="rgba(255,255,255,.55)" stroke-dasharray="3 4"/>
+    <circle cx="${sx}" cy="${sy}" r="5.5" fill="#cbd5e1" stroke="#fff" stroke-width="2"/>
+    ${points.map((p, i) => `<text x="${X(i)}" y="${H - 6}" text-anchor="middle" fill="${i === sel ? '#fff' : '#a9bad3'}" font-size="9.5" font-weight="${i === sel ? 600 : 400}">${p.label}</text>`).join('')}
+  </svg><div class="tip" style="left:${sx / W * 100}%;top:${(sy - 10) / H * 100}%">${money(points[sel].v).replace(',00', '')}<small>${points[sel].sub}</small></div></div>`;
+}
+function compact(v) {
+  const a = Math.abs(v), s = v < 0 ? '-' : '';
+  if (a >= 1000) return `${s}${(a / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}k`;
+  return `${s}${Math.round(a)}`;
+}
+
+function donut(cats, total) {
+  const r = 46, c = 2 * Math.PI * r; let off = 0;
+  const segs = cats.map(([id, v]) => {
+    const len = total ? v / total * c : 0;
+    const s = `<circle r="${r}" cx="60" cy="60" fill="none" stroke="${cat(id).color}" stroke-width="16" stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-off}" transform="rotate(-90 60 60)"/>`;
+    off += len; return s;
+  }).join('');
+  return `<svg viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Gastos por categoria">${segs}
+    <text x="60" y="56" text-anchor="middle" fill="#a9bad3" font-size="9">Total</text>
+    <text x="60" y="71" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">${money(total).replace('R$', '').trim()}</text></svg>`;
+}
+
+/* ---------- telas ---------- */
 function render() {
   $('#monthLabel').textContent = ymLabel(state.ym, true);
   $('#monthNav').style.visibility = ['rec', 'cfg'].includes(state.tab) ? 'hidden' : 'visible';
   $('#fab').classList.toggle('hide', state.tab === 'cfg');
+  $('#fabTxt').textContent = { dash: 'Adicionar', desp: 'Nova despesa', rec: 'Novo a receber', ent: 'Nova entrada' }[state.tab] || '';
   $$('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
-  const v = $('#view');
-  v.innerHTML = ({ dash: viewDash, desp: viewDesp, rec: viewRec, ent: viewEnt, cfg: viewCfg })[state.tab]();
-  window.scrollTo(0, 0);
+  $('#view').innerHTML = ({ dash: viewDash, desp: viewDesp, rec: viewRec, ent: viewEnt, cfg: viewCfg })[state.tab]();
+  updateBell();
+}
+
+function alertBar() {
+  const late = dueAlerts().filter(x => x.date < today()), todayN = dueAlerts().length - late.length;
+  if (!late.length && !todayN) return '';
+  const parts = [];
+  if (late.length) parts.push(`<b>${late.length} conta${late.length > 1 ? 's' : ''} atrasada${late.length > 1 ? 's' : ''}</b>`);
+  if (todayN) parts.push(`<b>${todayN}</b> vencendo`);
+  return `<button class="alertbar" data-act="alerts">🔔 <span>${parts.join(' · ')} — toque para ver</span></button>`;
 }
 
 function viewDash() {
   const s = summary(state.ym);
   const pendRec = db.receivables.filter(r => !r.received);
   const totalRec = pendRec.reduce((a, r) => a + (Number(r.amount) || 0), 0);
-  const lateRec = pendRec.filter(r => r.due && r.due < today());
-  const usedPct = s.entradas > 0 ? Math.min(100, s.despesas / s.entradas * 100) : (s.despesas > 0 ? 100 : 0);
-  const futureInst = futureInstallmentsTotal();
+  const h = new Date().getHours(), hello = h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
+  const usedPct = s.entradas > 0 ? Math.round(s.despesas / s.entradas * 100) : 0;
 
-  let h = `
-  <div class="card hero ${s.sobra < 0 ? 'neg' : ''}">
-    <div class="lbl">${s.sobra < 0 ? 'Faltando' : 'Sobrando'} em ${ymLabel(state.ym, true)}</div>
-    <div class="big">${money(Math.abs(s.sobra))}</div>
-    <div class="row"><span>⬆ Entradas ${money(s.entradas)}</span><span>⬇ Despesas ${money(s.despesas)}</span></div>
-    <div class="bar"><i style="width:${usedPct.toFixed(1)}%"></i></div>
-    <div class="row" style="margin-top:6px"><span>${usedPct.toFixed(0)}% da renda comprometida</span></div>
-  </div>
-  <div class="grid">
+  let out = alertBar() + `
+  <section class="hero">
+    <div class="greet"><div class="hi">${hello}! <b>👋</b></div><div class="big">Vamos ver suas finanças</div></div>
+    <div class="pcard ${s.sobra < 0 ? 'neg' : ''}"><span class="chip-ic">▦</span>
+      <div class="lbl">${s.sobra < 0 ? 'Faltando em' : 'Sobrando em'}</div><div class="nm" style="text-transform:capitalize">${ymLabel(state.ym, true)}</div>
+      <div class="amt">${money(Math.abs(s.sobra))}</div>
+      <div class="delta">${usedPct}% da renda gasta</div></div>
+  </section>
+  <section class="pills">
+    <button class="pill" data-act="newexp"><span class="circ">↗</span><b>Despesa</b></button>
+    <div class="pill split"><div><div class="k">Entradas</div><div class="v">${money0(s.entradas)}</div></div><div><div class="k">Despesas</div><div class="v">${money0(s.despesas)}</div></div></div>
+  </section>`;
+
+  const unpaid = s.exps.filter(x => !x.paid);
+  out += `<h2>Contas a pagar <button class="add-btn" data-act="newexp"><i>+</i>Adicionar</button></h2>`;
+  out += unpaid.length ? `<div class="bills">${unpaid.slice(0, 6).map(billCard).join('')}</div>${unpaid.length > 6 ? `<p class="muted" style="text-align:center">+${unpaid.length - 6} — veja em Despesas</p>` : ''}`
+    : `<div class="glass"><div class="empty"><b>✅</b>${s.exps.length ? 'Tudo pago neste mês!' : 'Nenhuma conta neste mês'}</div></div>`;
+
+  out += `<h2>Painel</h2><div class="glass">`;
+  const pts = Array.from({ length: 6 }, (_, i) => { const m = addMonths(state.ym, i - 2); return { v: summary(m).sobra, label: ymLabel(m).split('/')[0], sub: `sobra ${ymLabel(m)}` }; });
+  out += lineChart(pts, 2);
+  out += `<div class="balance"><span>A receber</span><b>${money(totalRec)}</b></div>
+    <div class="balance" style="margin-top:8px"><span>Falta pagar no mês</span><b class="${s.aPagar > 0 ? 'warn' : 'pos'}">${money(s.aPagar)}</b></div></div>`;
+
+  out += `<section class="sheet" style="margin-top:24px"><h2>Quem me deve <button class="link" data-tab-go="rec">Ver todos ›</button></h2>
+    <div class="cols"><span>Pessoas</span><span>Valor</span></div>`;
+  out += pendRec.length ? pendRec.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).slice(0, 4).map(recRow).join('') : '<div class="empty"><b>🤝</b>Ninguém te deve no momento</div>';
+  out += `</section>`;
+
+  out += `<h2>Resumo de ${ymLabel(state.ym)}</h2><div class="grid">
     <div class="stat"><div class="lbl">Já pago</div><div class="val pos">${money(s.pago)}</div></div>
-    <div class="stat"><div class="lbl">Falta pagar</div><div class="val ${s.aPagar > 0 ? 'warn' : ''}">${money(s.aPagar)}</div></div>
-    <div class="stat"><div class="lbl">A receber (total)</div><div class="val" style="color:var(--blue)">${money(totalRec)}</div>${lateRec.length ? `<div class="muted" style="color:var(--red)">${lateRec.length} atrasado(s)</div>` : `<div class="muted">${pendRec.length} pendente(s)</div>`}</div>
-    <div class="stat"><div class="lbl">Parcelas futuras</div><div class="val">${money(futureInst)}</div><div class="muted">após este mês</div></div>
-  </div>`;
+    <div class="stat"><div class="lbl">Parcelas futuras</div><div class="val">${money(futureInstallmentsTotal())}</div><div class="muted">após este mês</div></div></div>`;
 
-  h += `<h2>Gastos por tipo</h2>`;
   const cats = Object.entries(s.byCat).sort((a, b) => b[1] - a[1]);
-  if (!cats.length) h += `<div class="empty"><b>🧾</b>Nenhuma despesa neste mês</div>`;
-  else h += `<div class="card donut-wrap">${donut(cats, s.despesas)}<div class="legend">${cats.slice(0, 7).map(([id, v]) => { const c = cat(id); return `<div><i class="dot" style="background:${c.color}"></i><span class="n">${c.icon} ${esc(c.name)}</span><b>${money(v)}</b></div>`; }).join('')}${cats.length > 7 ? `<div class="muted">+${cats.length - 7} outros</div>` : ''}</div></div>`;
-
-  h += `<h2>Próximos 6 meses</h2><div class="card">${projection()}</div>`;
-
-  const pend = s.exps.filter(x => !x.paid);
-  h += `<h2>Contas a pagar em ${ymLabel(state.ym)}</h2>`;
-  h += pend.length ? `<div class="list">${pend.slice(0, 6).map(expItem).join('')}</div>${pend.length > 6 ? `<p class="muted" style="text-align:center">+${pend.length - 6} na aba Despesas</p>` : ''}`
-    : `<div class="empty"><b>✅</b>Tudo pago neste mês</div>`;
-
-  if (pendRec.length) {
-    h += `<h2>Próximos recebimentos</h2><div class="list">${pendRec.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).slice(0, 4).map(recItem).join('')}</div>`;
-  }
-  return h;
+  if (cats.length) out += `<h2>Gastos por tipo</h2><div class="glass donut-wrap">${donut(cats, s.despesas)}<div class="legend">${cats.slice(0, 6).map(([id, v]) => { const c = cat(id); return `<div><i class="dot" style="background:${c.color}"></i><span class="n">${c.icon} ${esc(c.name)}</span><b>${money(v)}</b></div>`; }).join('')}${cats.length > 6 ? `<div class="muted">+${cats.length - 6} outros</div>` : ''}</div></div>`;
+  return out;
 }
 
 function futureInstallmentsTotal() {
@@ -183,151 +379,117 @@ function futureInstallmentsTotal() {
   return t / 100;
 }
 
-function donut(cats, total) {
-  const r = 52, c = 2 * Math.PI * r; let off = 0;
-  const segs = cats.map(([id, v]) => {
-    const len = total ? v / total * c : 0;
-    const s = `<circle r="${r}" cx="65" cy="65" fill="none" stroke="${cat(id).color}" stroke-width="18" stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-off}" transform="rotate(-90 65 65)"/>`;
-    off += len; return s;
-  }).join('');
-  return `<svg viewBox="0 0 130 130" width="130" height="130" role="img" aria-label="Gastos por categoria">${segs}
-    <text x="65" y="61" text-anchor="middle" fill="#8a9aab" font-size="10">Total</text>
-    <text x="65" y="77" text-anchor="middle" fill="#e8eef4" font-size="13" font-weight="700">${money(total).replace('R$', '').trim()}</text></svg>`;
-}
-
-function projection() {
-  const months = Array.from({ length: 6 }, (_, i) => addMonths(state.ym, i));
-  const data = months.map(m => { const s = summary(m); return { m, in: s.entradas, out: s.despesas, sobra: s.sobra }; });
-  const max = Math.max(1, ...data.map(d => Math.max(d.in, d.out)));
-  return `<div class="proj">${data.map((d, i) => `
-    <div class="col ${i === 0 ? 'cur' : ''}">
-      <div class="s ${d.sobra < 0 ? 'neg-t' : 'pos'}">${compact(d.sobra)}</div>
-      <div class="bars"><i style="height:${d.in / max * 100}%;background:var(--green)"></i><i style="height:${d.out / max * 100}%;background:var(--red)"></i></div>
-      <div class="m">${ymLabel(d.m)}</div>
-    </div>`).join('')}</div>
-    <div class="keys"><span><i class="dot" style="background:var(--green)"></i>Entradas</span><span><i class="dot" style="background:var(--red)"></i>Despesas</span><span>Topo: sobra</span></div>`;
-}
-function compact(v) {
-  const a = Math.abs(v), s = v < 0 ? '-' : '';
-  if (a >= 1000) return `${s}${(a / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}k`;
-  return `${s}${Math.round(a)}`;
-}
-
-function expItem(x) {
-  const c = cat(x.e.cat), late = !x.paid && x.date < today();
-  const kind = x.e.mode === 'parcelada' ? `<span class="tag">${x.k + 1}/${x.e.n}</span>` : x.e.mode === 'fixa' ? '<span class="tag">fixa</span>' : '';
-  return `<div class="item ${x.paid ? 'done' : ''}" data-edit-exp="${x.e.id}">
-    <div class="ic" style="background:${c.color}22">${c.icon}</div>
-    <div class="mid"><div class="t">${esc(x.e.desc)}</div>
-      <div class="sub"><span>${esc(c.name)}</span>${kind}<span class="${late ? 'tag late' : ''}">${late ? 'venceu ' : 'vence '}${fmtDate(x.date).slice(0, 5)}</span></div></div>
-    <div class="amt">${money(x.value)}</div>
-    <button class="check ${x.paid ? 'on' : ''}" data-pay="${x.e.id}" data-ym="${x.ym}" aria-label="Marcar como pago">✓</button>
-  </div>`;
-}
-
 function viewDesp() {
   const s = summary(state.ym);
   const used = [...new Set(s.exps.map(x => x.e.cat))];
   if (state.catFilter && !used.includes(state.catFilter)) state.catFilter = null;
-  const list = s.exps.filter(x => !state.catFilter || x.e.cat === state.catFilter);
+  let list = s.exps.filter(x => !state.catFilter || x.e.cat === state.catFilter);
   const tot = list.reduce((a, x) => a + x.value, 0), paid = list.filter(x => x.paid).reduce((a, x) => a + x.value, 0);
-  let h = `<div class="grid" style="margin-top:0">
+  const nPend = list.filter(x => !x.paid).length;
+  if (state.despFilter === 'pend') list = list.filter(x => !x.paid);
+  if (state.despFilter === 'paid') list = list.filter(x => x.paid);
+  let h = `<div class="title">Despesas</div><div class="grid">
     <div class="stat"><div class="lbl">Total do mês</div><div class="val">${money(tot)}</div></div>
-    <div class="stat"><div class="lbl">Falta pagar</div><div class="val ${tot - paid > 0 ? 'warn' : 'pos'}">${money(tot - paid)}</div></div></div>`;
-  if (used.length > 1) h += `<h2>Filtrar por tipo</h2><div class="chips"><button class="chip ${!state.catFilter ? 'on' : ''}" data-cat="">Todas</button>${used.map(id => `<button class="chip ${state.catFilter === id ? 'on' : ''}" data-cat="${id}">${cat(id).icon} ${esc(cat(id).name)}</button>`).join('')}</div>`;
-  else h += '<h2>Despesas do mês</h2>';
-  h += list.length ? `<div class="list">${list.map(expItem).join('')}</div>` : `<div class="empty"><b>💸</b>Nenhuma despesa em ${ymLabel(state.ym, true)}.<br>Toque em <b style="display:inline;font-size:inherit">+</b> para cadastrar.</div>`;
+    <div class="stat"><div class="lbl">Falta pagar</div><div class="val ${tot - paid > 0 ? 'warn' : 'pos'}">${money(tot - paid)}</div></div></div>
+    <div class="seg" style="margin:14px 0 12px">${[['all', 'Todas'], ['pend', `A pagar (${nPend})`], ['paid', 'Pagas']].map(([k, l]) => `<button class="${state.despFilter === k ? 'on' : ''}" data-despf="${k}">${l}</button>`).join('')}</div>`;
+  if (used.length > 1) h += `<div class="chips"><button class="chip ${!state.catFilter ? 'on' : ''}" data-cat="">Todos os tipos</button>${used.map(id => `<button class="chip ${state.catFilter === id ? 'on' : ''}" data-cat="${id}">${cat(id).icon} ${esc(cat(id).name)}</button>`).join('')}</div>`;
+  h += list.length ? `<div class="bills">${list.map(billCard).join('')}</div>` : `<div class="glass"><div class="empty"><b>💸</b>Nada por aqui em ${ymLabel(state.ym, true)}.</div></div>`;
   return h;
-}
-
-function recItem(r) {
-  const late = !r.received && r.due && r.due < today();
-  return `<div class="item ${r.received ? 'done' : ''}" data-edit-rec="${r.id}">
-    <div class="ic" style="background:#60a5fa22">🤝</div>
-    <div class="mid"><div class="t">${esc(r.desc)}</div>
-      <div class="sub">${r.who ? `<span>${esc(r.who)}</span>` : ''}${r.received ? `<span class="tag ok">recebido ${fmtDate(r.receivedAt)}</span>` : r.due ? `<span class="${late ? 'tag late' : ''}">${late ? 'atrasado · ' : 'previsto '}${fmtDate(r.due)}</span>` : '<span>sem data</span>'}</div></div>
-    <div class="amt" style="color:var(--blue)">${money(r.amount)}</div>
-    <button class="check ${r.received ? 'on' : ''}" data-recv="${r.id}" aria-label="Marcar como recebido">✓</button>
-  </div>`;
 }
 
 function viewRec() {
   const pend = db.receivables.filter(r => !r.received), done = db.receivables.filter(r => r.received);
   const tp = pend.reduce((a, r) => a + (Number(r.amount) || 0), 0), td = done.reduce((a, r) => a + (Number(r.amount) || 0), 0);
   const list = (state.recFilter === 'pend' ? pend : done).sort((a, b) => state.recFilter === 'pend' ? (a.due || '9').localeCompare(b.due || '9') : (b.receivedAt || '').localeCompare(a.receivedAt || ''));
-  let h = `<div class="grid" style="margin-top:0">
+  return `<div class="title">A receber</div><div class="grid">
     <div class="stat"><div class="lbl">Para receber</div><div class="val" style="color:var(--blue)">${money(tp)}</div></div>
     <div class="stat"><div class="lbl">Já recebido</div><div class="val pos">${money(td)}</div></div></div>
-    <h2>Dinheiro a receber</h2>
-    <div class="seg" style="margin-bottom:10px"><button class="${state.recFilter === 'pend' ? 'on' : ''}" data-recf="pend">Pendentes (${pend.length})</button><button class="${state.recFilter === 'done' ? 'on' : ''}" data-recf="done">Recebidos (${done.length})</button></div>`;
-  h += list.length ? `<div class="list">${list.map(recItem).join('')}</div>` : `<div class="empty"><b>🤝</b>${state.recFilter === 'pend' ? 'Ninguém te deve nada por aqui.<br>Toque em + para cadastrar um valor a receber.' : 'Nenhum recebimento ainda.'}</div>`;
-  return h;
+    <div class="seg" style="margin:14px 0"><button class="${state.recFilter === 'pend' ? 'on' : ''}" data-recf="pend">Pendentes (${pend.length})</button><button class="${state.recFilter === 'done' ? 'on' : ''}" data-recf="done">Recebidos (${done.length})</button></div>
+    <section class="sheet"><div class="cols" style="margin-top:0"><span>Quem deve</span><span>Valor</span></div>
+    ${list.length ? list.map(recRow).join('') : `<div class="empty"><b>🤝</b>${state.recFilter === 'pend' ? 'Ninguém te deve nada por aqui.' : 'Nenhum recebimento ainda.'}</div>`}</section>`;
 }
 
 function viewEnt() {
   const s = summary(state.ym);
-  let h = `<div class="grid" style="margin-top:0">
+  const rows = s.incs.map(x => `<div class="row" data-edit-inc="${x.i.id}"><div class="ic">💰</div>
+      <div class="mid"><div class="t">${esc(x.i.desc)}</div><div class="sub">${x.i.recurring ? '<span class="tag">mensal</span>' : ''}<span>dia ${fmtDate(x.date).slice(0, 5)}</span></div></div>
+      <div class="amt">${money(x.value)} <span class="arrow-dn">↙</span></div></div>`)
+    .concat(s.recs.map(r => `<div class="row" data-edit-rec="${r.id}"><div class="ic">🤝</div>
+      <div class="mid"><div class="t">${esc(r.desc)}</div><div class="sub"><span class="tag ok">recebido</span>${r.who ? `<span>${esc(r.who)}</span>` : ''}</div></div>
+      <div class="amt">${money(r.amount)}</div></div>`));
+  return `<div class="title">Entradas</div><div class="grid">
     <div class="stat"><div class="lbl">Renda do mês</div><div class="val pos">${money(s.renda)}</div></div>
     <div class="stat"><div class="lbl">Recebidos no mês</div><div class="val" style="color:var(--blue)">${money(s.recebido)}</div></div></div>
-    <h2>Entradas de ${ymLabel(state.ym, true)}</h2>`;
-  const items = s.incs.map(x => `<div class="item" data-edit-inc="${x.i.id}">
-      <div class="ic" style="background:#22c55e22">💰</div>
-      <div class="mid"><div class="t">${esc(x.i.desc)}</div><div class="sub">${x.i.recurring ? '<span class="tag">mensal</span>' : ''}<span>dia ${fmtDate(x.date).slice(0, 5)}</span></div></div>
-      <div class="amt pos">${money(x.value)}</div></div>`)
-    .concat(s.recs.map(r => `<div class="item" data-edit-rec="${r.id}">
-      <div class="ic" style="background:#60a5fa22">🤝</div>
-      <div class="mid"><div class="t">${esc(r.desc)}</div><div class="sub"><span class="tag ok">valor recebido</span>${r.who ? `<span>${esc(r.who)}</span>` : ''}</div></div>
-      <div class="amt" style="color:var(--blue)">${money(r.amount)}</div></div>`));
-  h += items.length ? `<div class="list">${items.join('')}</div>` : `<div class="empty"><b>💰</b>Cadastre seu salário e outras rendas<br>para o app calcular quanto sobra.</div>`;
-  return h;
+    <section class="sheet" style="margin-top:16px"><h2>${ymLabel(state.ym, true).replace(/^./, c => c.toUpperCase())}</h2>
+    ${rows.length ? rows.join('') : '<div class="empty"><b>💰</b>Cadastre seu salário e outras rendas para o app calcular quanto sobra.</div>'}</section>`;
 }
 
 function viewCfg() {
-  return `<h2>Tipos de despesa</h2><div class="card">${db.cats.map(c => `
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const on = db.settings.notify && perm === 'granted';
+  return `<div class="title">Ajustes</div>
+  <h2>🔔 Lembretes de pagamento</h2><div class="glass">
+    <div class="cfg-row"><span class="n">Avisar</span><select data-setting="daysBefore">${[[0, 'no dia do vencimento'], [1, '1 dia antes'], [2, '2 dias antes'], [3, '3 dias antes'], [5, '5 dias antes'], [7, '7 dias antes']].map(([v, l]) => `<option value="${v}" ${Number(db.settings.daysBefore) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="cfg-row"><span class="n">Notificações no celular<br><span class="muted">${on ? 'Ativadas ✓' : perm === 'denied' ? 'Bloqueadas nas configurações do navegador' : perm === 'unsupported' ? 'Não suportado aqui — use o calendário' : 'Desativadas'}</span></span>
+      ${on ? '<button class="btn sm" data-act="notifyoff">Desativar</button>' : perm !== 'unsupported' && perm !== 'denied' ? '<button class="btn sm primary" data-act="notifyon">Ativar</button>' : ''}</div>
+    <div class="cfg-row"><span class="n">Lembretes na agenda<br><span class="muted">Adiciona as contas em aberto (12 meses) com alarme no calendário do celular — funciona mesmo com o app fechado.</span></span>
+      <button class="btn sm primary" data-act="ics">📅 Exportar</button></div>
+    <p class="muted" style="margin:8px 0 0">No iPhone, as notificações só funcionam com o app instalado na tela de início. O app avisa sempre que é aberto; com o app fechado, o calendário é o jeito mais garantido.</p>
+  </div>
+  <h2>Tipos de despesa</h2><div class="glass">${db.cats.map(c => `
     <div class="cfg-row"><span class="dot" style="background:${c.color}"></span><span style="font-size:20px">${c.icon}</span><span class="n">${esc(c.name)}</span>
     <button class="btn sm" data-cat-edit="${c.id}">Editar</button></div>`).join('')}
-    <div class="actions"><button class="btn" data-act="newcat">+ Novo tipo</button></div></div>
-  <h2>Backup</h2><div class="card">
-    <p class="muted" style="margin-top:0">Seus dados ficam salvos só neste aparelho. Faça backup de vez em quando para não perder nada.</p>
+    <div class="actions" style="margin-top:8px"><button class="btn" data-act="newcat">+ Novo tipo</button></div></div>
+  <h2>Backup</h2><div class="glass">
+    <p class="muted" style="margin-top:0">Seus dados ficam salvos só neste aparelho. Faça backup de vez em quando.</p>
     <div class="actions"><button class="btn primary" data-act="export">⬇ Exportar</button><button class="btn" data-act="import">⬆ Importar</button></div>
     <input type="file" id="importFile" accept="application/json,.json" hidden></div>
-  <h2>App</h2><div class="card">
-    <div class="actions" id="installBox" ${deferredInstall ? '' : 'hidden'}><button class="btn primary" data-act="install">📲 Instalar app</button></div>
-    <p class="muted">${db.expenses.length} despesas · ${db.incomes.length} entradas · ${db.receivables.length} valores a receber</p>
+  <h2>App</h2><div class="glass">
+    ${deferredInstall ? '<div class="actions" style="margin-bottom:10px"><button class="btn primary" data-act="install">📲 Instalar app</button></div>' : ''}
+    <p class="muted" style="margin-top:0">${db.expenses.length} despesas · ${db.incomes.length} entradas · ${db.receivables.length} a receber</p>
     <div class="actions"><button class="btn danger" data-act="wipe">Apagar todos os dados</button></div></div>`;
 }
 
-/* ---------- formulários (modal) ---------- */
+/* ---------- modal ---------- */
 const modal = $('#modal'), form = $('#modalForm');
-function openModal(html, onReady) {
-  form.innerHTML = html;
-  modal.showModal();
-  onReady && onReady();
-}
+function openModal(html, onReady) { form.innerHTML = html; form.onsubmit = null; form.oninput = null; modal.showModal(); onReady && onReady(); }
 const closeModal = () => modal.close();
 modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+const head = t => `<div class="mhead"><h3>${t}</h3><button type="button" class="icon-btn" data-close>✕</button></div>`;
 
-function expenseForm(e) {
+function alertsModal() {
+  const a = dueAlerts(), r = recAlerts();
+  openModal(`${head('🔔 Lembretes')}
+    ${a.length ? `<div class="sheet" style="padding:10px 14px;box-shadow:none">${a.map(expRow).join('')}</div>` : '<div class="empty"><b>✅</b>Nenhuma conta vencendo</div>'}
+    ${r.length ? `<div class="mhead"><h3 style="font-size:15px">Para cobrar</h3></div><div class="sheet" style="padding:10px 14px;box-shadow:none">${r.map(recRow).join('')}</div>` : ''}
+    ${db.settings.notify ? '' : '<div class="actions"><button type="button" class="btn primary" data-act="notifyon">Ativar notificações no celular</button></div>'}`);
+}
+
+function expenseForm(e, ym) {
   const isNew = !e;
   e = e || { desc: '', amount: '', cat: db.cats[0]?.id, mode: 'unica', n: 2, start: dateIn(state.ym, new Date().getDate()), note: '', paid: {} };
-  let mode = e.mode, valueIs = 'total', selCat = e.cat;
-  openModal(`
-    <div class="mhead"><h3>${isNew ? 'Nova despesa' : 'Editar despesa'}</h3><button type="button" class="icon-btn" data-close>✕</button></div>
+  let mode = e.mode, selCat = e.cat;
+  const occYM = () => isNew ? ymOf(form.start.value || today()) : (ym || ymOf(e.start));
+  const pi = isNew ? undefined : paidInfo(e, occYM());
+  openModal(`${head(isNew ? 'Nova despesa' : 'Editar despesa')}
     <label class="f">Descrição<input name="desc" required maxlength="80" placeholder="Ex.: Aluguel, Geladeira, Farmácia" value="${esc(e.desc)}"></label>
-    <div class="f" style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)">Tipo de despesa
+    <div class="f">Tipo de despesa
       <div class="cats">${db.cats.map(c => `<button type="button" data-c="${c.id}" class="${c.id === selCat ? 'on' : ''}"><span>${c.icon}</span>${esc(c.name)}</button>`).join('')}</div></div>
-    <div class="f" style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)">Forma de pagamento
+    <div class="f">Forma de pagamento
       <div class="seg" id="segMode"><button type="button" data-m="unica">À vista / única</button><button type="button" data-m="parcelada">Parcelada</button><button type="button" data-m="fixa">Fixa mensal</button></div></div>
     <div id="parcBox" class="row2">
-      <label class="f">Nº de parcelas<input name="n" type="number" min="2" max="120" inputmode="numeric" value="${e.n || 2}"></label>
+      <label class="f">Nº de parcelas<input name="n" type="number" min="2" max="120" inputmode="numeric" value="${e.n > 1 ? e.n : 2}"></label>
       <label class="f">O valor é<select name="valueIs"><option value="total">Total da compra</option><option value="parcela">De cada parcela</option></select></label>
     </div>
     <div class="row2">
       <label class="f" id="amtLbl">Valor (R$)<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required placeholder="0,00" value="${e.amount}"></label>
-      <label class="f" id="dateLbl">Vencimento<input name="start" type="date" required value="${e.start}"></label>
+      <label class="f" id="dateLbl">Data de pagamento<input name="start" type="date" required value="${e.start}"></label>
     </div>
     <div class="preview" id="preview"></div>
-    <label class="cb" id="paidBox"><input type="checkbox" name="paidNow" ${isNew ? '' : (e.paid && e.paid[ymOf(e.start)] ? 'checked' : '')}> Já está paga</label>
+    <div class="box"><div class="hd" id="payHd"></div>
+      <label class="cb"><input type="checkbox" name="paidNow" ${pi !== undefined ? 'checked' : ''}> Já está paga</label>
+      <label class="f" id="paidAtBox">Pago em<input name="paidAt" type="date" value="${pi || today()}"></label>
+    </div>
     <label class="f">Observação<textarea name="note" rows="2" maxlength="300">${esc(e.note || '')}</textarea></label>
     <div class="actions"><button type="submit" class="btn primary">Salvar</button></div>
     ${isNew ? '' : `<div class="actions">${e.mode === 'fixa' && !e.end ? '<button type="button" class="btn" data-end>Encerrar a partir deste mês</button>' : ''}<button type="button" class="btn danger" data-del>Excluir</button></div>`}
@@ -336,41 +498,42 @@ function expenseForm(e) {
     const upd = () => {
       $$('#segMode button', f).forEach(b => b.classList.toggle('on', b.dataset.m === mode));
       $('#parcBox', f).style.display = mode === 'parcelada' ? '' : 'none';
-      $('#paidBox', f).style.display = mode === 'unica' ? '' : 'none';
       $('#amtLbl', f).firstChild.textContent = mode === 'fixa' ? 'Valor mensal (R$)' : mode === 'parcelada' ? (f.valueIs.value === 'total' ? 'Valor total (R$)' : 'Valor da parcela (R$)') : 'Valor (R$)';
-      $('#dateLbl', f).firstChild.textContent = mode === 'parcelada' ? '1ª parcela vence em' : mode === 'fixa' ? 'Começa em (dia do venc.)' : 'Vencimento';
+      $('#dateLbl', f).firstChild.textContent = mode === 'parcelada' ? 'Pagar 1ª parcela em' : mode === 'fixa' ? 'Pagar todo mês a partir de' : 'Data de pagamento';
+      $('#paidAtBox', f).style.display = f.paidNow.checked ? '' : 'none';
+      const k = diffMonths(occYM(), ymOf(f.start.value || today()));
+      $('#payHd', f).textContent = mode === 'unica' || isNew ? 'Pagamento' : `Pagamento de ${ymLabel(occYM(), true)}${mode === 'parcelada' ? ` (parcela ${k + 1})` : ''}`;
       const v = Number(f.amount.value) || 0, n = Math.max(1, parseInt(f.n.value) || 1);
-      let p = '';
+      let p;
       if (mode === 'parcelada') {
         const total = f.valueIs.value === 'total' ? v : v * n;
-        const end = addMonths(ymOf(f.start.value || today()), n - 1);
-        p = `<b>${n}x de ${money(total / n)}</b> = ${money(total)} · última em ${ymLabel(end, true)}`;
+        p = `<b>${n}x de ${money(total / n)}</b> = ${money(total)} · última em ${ymLabel(addMonths(ymOf(f.start.value || today()), n - 1), true)}`;
       } else if (mode === 'fixa') p = `Repete todo mês: <b>${money(v)}</b> (${money(v * 12)} por ano)`;
       else p = `Pagamento único de <b>${money(v)}</b>`;
-      $('#preview', f).innerHTML = p;
+      $('#preview', f).innerHTML = p + `<br>🔔 Aviso ${Number(db.settings.daysBefore) ? `${db.settings.daysBefore} dia(s) antes` : 'no dia'} do pagamento`;
     };
     $('#segMode', f).onclick = ev => { const b = ev.target.closest('button'); if (b) { mode = b.dataset.m; upd(); } };
     $('.cats', f).onclick = ev => { const b = ev.target.closest('button'); if (b) { selCat = b.dataset.c; $$('.cats button', f).forEach(x => x.classList.toggle('on', x === b)); } };
-    f.oninput = upd;
+    f.oninput = upd; f.onchange = upd;
     upd();
     f.onsubmit = ev => {
       ev.preventDefault();
       const v = Number(f.amount.value), n = Math.max(2, Math.min(120, parseInt(f.n.value) || 2));
       if (!(v > 0)) return toast('Informe um valor');
-      if (!f.start.value) return toast('Informe a data');
+      if (!f.start.value) return toast('Informe a data de pagamento');
       const data = { desc: f.desc.value.trim(), cat: selCat, mode, start: f.start.value, note: f.note.value.trim() };
       if (mode === 'parcelada') { data.n = n; data.amount = f.valueIs.value === 'total' ? v : Math.round(v * n * 100) / 100; }
       else { data.n = 1; data.amount = v; }
-      if (isNew) {
-        const obj = { id: uid(), paid: {}, end: null, created: today(), ...data };
-        if (mode === 'unica' && f.paidNow.checked) obj.paid[ymOf(obj.start)] = true;
-        db.expenses.push(obj);
-      } else {
-        const obj = db.expenses.find(x => x.id === e.id);
+      let obj;
+      if (isNew) { obj = { id: uid(), paid: {}, end: null, created: today(), ...data }; db.expenses.push(obj); }
+      else {
+        obj = db.expenses.find(x => x.id === e.id);
         Object.assign(obj, data);
-        if (mode === 'unica') obj.paid = f.paidNow.checked ? { [ymOf(obj.start)]: true } : {};
         if (mode !== 'fixa') obj.end = null;
+        if (mode === 'unica') { const keep = Object.values(obj.paid || {})[0]; obj.paid = keep ? { [ymOf(obj.start)]: keep } : {}; }
       }
+      const key = mode === 'unica' ? ymOf(obj.start) : occYM();
+      setPaid(obj, key, f.paidNow.checked, f.paidAt.value);
       save(); closeModal(); render(); toast(isNew ? 'Despesa cadastrada' : 'Despesa atualizada');
     };
     const del = $('[data-del]', f);
@@ -380,8 +543,8 @@ function expenseForm(e) {
     };
     const end = $('[data-end]', f);
     if (end) end.onclick = () => {
-      const obj = db.expenses.find(x => x.id === e.id);
-      obj.end = addMonths(state.ym, -1) < ymOf(obj.start) ? ymOf(obj.start) : addMonths(state.ym, -1);
+      const obj = db.expenses.find(x => x.id === e.id), m = addMonths(state.ym, -1);
+      obj.end = m < ymOf(obj.start) ? ymOf(obj.start) : m;
       save(); closeModal(); render(); toast(`Encerrada: última em ${ymLabel(obj.end, true)}`);
     };
   });
@@ -390,9 +553,8 @@ function expenseForm(e) {
 function incomeForm(i) {
   const isNew = !i;
   i = i || { desc: '', amount: '', date: dateIn(state.ym, 5), recurring: true };
-  openModal(`
-    <div class="mhead"><h3>${isNew ? 'Nova entrada' : 'Editar entrada'}</h3><button type="button" class="icon-btn" data-close>✕</button></div>
-    <label class="f">Descrição<input name="desc" required maxlength="80" placeholder="Ex.: Salário, Freela, Aluguel recebido" value="${esc(i.desc)}"></label>
+  openModal(`${head(isNew ? 'Nova entrada' : 'Editar entrada')}
+    <label class="f">Descrição<input name="desc" required maxlength="80" placeholder="Ex.: Salário, Freela" value="${esc(i.desc)}"></label>
     <div class="row2">
       <label class="f">Valor (R$)<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${i.amount}"></label>
       <label class="f">Data<input name="date" type="date" required value="${i.date}"></label>
@@ -406,41 +568,40 @@ function incomeForm(i) {
       ev.preventDefault();
       const data = { desc: f.desc.value.trim(), amount: Number(f.amount.value), date: f.date.value, recurring: f.recurring.checked };
       if (!(data.amount > 0)) return toast('Informe um valor');
-      if (isNew) db.incomes.push({ id: uid(), end: null, ...data });
-      else Object.assign(db.incomes.find(x => x.id === i.id), data);
+      if (isNew) db.incomes.push({ id: uid(), end: null, ...data }); else Object.assign(db.incomes.find(x => x.id === i.id), data);
       save(); closeModal(); render(); toast('Entrada salva');
     };
     const del = $('[data-del]', f);
     if (del) del.onclick = () => { if (!confirm(`Excluir "${i.desc}"?`)) return; db.incomes = db.incomes.filter(x => x.id !== i.id); save(); closeModal(); render(); };
     const end = $('[data-end]', f);
-    if (end) end.onclick = () => { const o = db.incomes.find(x => x.id === i.id); const m = addMonths(state.ym, -1); o.end = m < ymOf(o.date) ? ymOf(o.date) : m; save(); closeModal(); render(); toast('Entrada encerrada'); };
+    if (end) end.onclick = () => { const o = db.incomes.find(x => x.id === i.id), m = addMonths(state.ym, -1); o.end = m < ymOf(o.date) ? ymOf(o.date) : m; save(); closeModal(); render(); toast('Entrada encerrada'); };
   });
 }
 
 function recForm(r) {
   const isNew = !r;
   r = r || { desc: '', who: '', amount: '', due: '', received: false, note: '' };
-  openModal(`
-    <div class="mhead"><h3>${isNew ? 'Dinheiro a receber' : 'Editar a receber'}</h3><button type="button" class="icon-btn" data-close>✕</button></div>
-    <label class="f">Descrição<input name="desc" required maxlength="80" placeholder="Ex.: Empréstimo, Venda do celular" value="${esc(r.desc)}"></label>
+  openModal(`${head(isNew ? 'Dinheiro a receber' : 'Editar a receber')}
     <label class="f">Quem vai pagar<input name="who" maxlength="60" placeholder="Nome da pessoa / empresa" value="${esc(r.who)}"></label>
+    <label class="f">Referente a<input name="desc" required maxlength="80" placeholder="Ex.: Empréstimo, Venda do celular" value="${esc(r.desc)}"></label>
     <div class="row2">
       <label class="f">Valor (R$)<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${r.amount}"></label>
       <label class="f">Previsão<input name="due" type="date" value="${r.due || ''}"></label>
     </div>
-    <label class="cb"><input type="checkbox" name="received" ${r.received ? 'checked' : ''}> Já recebi</label>
+    <div class="box"><label class="cb"><input type="checkbox" name="received" ${r.received ? 'checked' : ''}> Já recebi</label>
+      <label class="f" id="recAtBox">Recebido em<input name="receivedAt" type="date" value="${r.receivedAt || today()}"></label></div>
     <label class="f">Observação<textarea name="note" rows="2" maxlength="300">${esc(r.note || '')}</textarea></label>
     <div class="actions"><button type="submit" class="btn primary">Salvar</button></div>
     ${isNew ? '' : '<div class="actions"><button type="button" class="btn danger" data-del>Excluir</button></div>'}
   `, () => {
-    const f = form;
+    const f = form, upd = () => { $('#recAtBox', f).style.display = f.received.checked ? '' : 'none'; };
+    f.onchange = upd; upd();
     f.onsubmit = ev => {
       ev.preventDefault();
       const data = { desc: f.desc.value.trim(), who: f.who.value.trim(), amount: Number(f.amount.value), due: f.due.value, note: f.note.value.trim(), received: f.received.checked };
       if (!(data.amount > 0)) return toast('Informe um valor');
-      data.receivedAt = data.received ? (r.receivedAt || today()) : null;
-      if (isNew) db.receivables.push({ id: uid(), ...data });
-      else Object.assign(db.receivables.find(x => x.id === r.id), data);
+      data.receivedAt = data.received ? (f.receivedAt.value || today()) : null;
+      if (isNew) db.receivables.push({ id: uid(), ...data }); else Object.assign(db.receivables.find(x => x.id === r.id), data);
       save(); closeModal(); render(); toast('Salvo');
     };
     const del = $('[data-del]', f);
@@ -450,17 +611,16 @@ function recForm(r) {
 
 function catForm(c) {
   const isNew = !c;
-  c = c || { name: '', icon: '🏷️', color: '#22c55e' };
+  c = c || { name: '', icon: '🏷️', color: '#4f86e8' };
   const inUse = !isNew && db.expenses.some(e => e.cat === c.id);
-  openModal(`
-    <div class="mhead"><h3>${isNew ? 'Novo tipo de despesa' : 'Editar tipo'}</h3><button type="button" class="icon-btn" data-close>✕</button></div>
+  openModal(`${head(isNew ? 'Novo tipo de despesa' : 'Editar tipo')}
     <div class="row2">
       <label class="f">Ícone (emoji)<input name="icon" maxlength="4" value="${esc(c.icon)}"></label>
       <label class="f">Cor<input name="color" type="color" value="${c.color}" style="height:46px;padding:4px"></label>
     </div>
     <label class="f">Nome<input name="name" required maxlength="24" value="${esc(c.name)}" placeholder="Ex.: Pets"></label>
     <div class="actions"><button type="submit" class="btn primary">Salvar</button></div>
-    ${isNew ? '' : `<div class="actions"><button type="button" class="btn danger" data-del ${inUse ? 'disabled title="Em uso"' : ''}>${inUse ? 'Em uso — não pode excluir' : 'Excluir'}</button></div>`}
+    ${isNew ? '' : `<div class="actions"><button type="button" class="btn danger" data-del ${inUse ? 'disabled' : ''}>${inUse ? 'Em uso — não pode excluir' : 'Excluir'}</button></div>`}
   `, () => {
     const f = form;
     f.onsubmit = ev => {
@@ -474,61 +634,60 @@ function catForm(c) {
   });
 }
 
-/* ---------- eventos ---------- */
-form.addEventListener('click', e => { if (e.target.closest('[data-close]')) closeModal(); });
+function addMenu() {
+  openModal(`${head('Adicionar')}
+    <div class="sheet" style="padding:6px 14px;box-shadow:none">
+      <div class="row" data-new="exp" role="button"><div class="ic">💸</div><div class="mid"><div class="t">Despesa</div><div class="sub">Única, parcelada ou fixa mensal</div></div><span>›</span></div>
+      <div class="row" data-new="rec" role="button"><div class="ic">🤝</div><div class="mid"><div class="t">Dinheiro a receber</div><div class="sub">Alguém te deve / valor previsto</div></div><span>›</span></div>
+      <div class="row" data-new="inc" role="button"><div class="ic">💰</div><div class="mid"><div class="t">Entrada / renda</div><div class="sub">Salário e outras receitas</div></div><span>›</span></div>
+    </div>`);
+}
 
-$('.tabbar').onclick = e => { const b = e.target.closest('button'); if (b) { state.tab = b.dataset.tab; render(); } };
+/* ---------- eventos ---------- */
+$('.tabbar').onclick = e => { const b = e.target.closest('button'); if (b) { state.tab = b.dataset.tab; render(); window.scrollTo(0, 0); } };
 $('#monthNav').onclick = e => {
   const b = e.target.closest('[data-month]'); if (!b) return;
   const d = Number(b.dataset.month); state.ym = d === 0 ? curYM() : addMonths(state.ym, d); render();
 };
-$('#fab').onclick = () => {
-  if (state.tab === 'rec') return recForm();
-  if (state.tab === 'ent') return incomeForm();
-  if (state.tab === 'desp') return expenseForm();
-  openModal(`<div class="mhead"><h3>Adicionar</h3><button type="button" class="icon-btn" data-close>✕</button></div>
-    <div class="list">
-      <button type="button" class="item" data-new="exp"><div class="ic" style="background:#f8717122">💸</div><div class="mid"><div class="t">Despesa</div><div class="sub">Única, parcelada ou fixa mensal</div></div></button>
-      <button type="button" class="item" data-new="rec"><div class="ic" style="background:#60a5fa22">🤝</div><div class="mid"><div class="t">Dinheiro a receber</div><div class="sub">Alguém te deve / valor previsto</div></div></button>
-      <button type="button" class="item" data-new="inc"><div class="ic" style="background:#22c55e22">💰</div><div class="mid"><div class="t">Entrada / renda</div><div class="sub">Salário e outras receitas</div></div></button>
-    </div>`, () => {
-    form.querySelector('.list').onclick = ev => {
-      const b = ev.target.closest('[data-new]'); if (!b) return;
-      closeModal(); ({ exp: expenseForm, rec: recForm, inc: incomeForm })[b.dataset.new]();
-    };
-  });
-};
+$('#bell').onclick = alertsModal;
+$('#fab').onclick = () => ({ rec: recForm, ent: incomeForm, desp: () => expenseForm() })[state.tab]?.() ?? addMenu();
 
-$('#view').addEventListener('click', e => {
+function handleClick(e) {
   const t = e.target;
+  if (t.closest('[data-close]')) return closeModal();
   const pay = t.closest('[data-pay]');
   if (pay) {
     const ex = db.expenses.find(x => x.id === pay.dataset.pay), ym = pay.dataset.ym;
-    ex.paid = ex.paid || {};
-    if (ex.paid[ym]) delete ex.paid[ym]; else ex.paid[ym] = true;
-    save(); render(); toast(ex.paid[ym] ? 'Marcada como paga ✓' : 'Desmarcada'); return;
+    const on = paidInfo(ex, ym) === undefined;
+    setPaid(ex, ym, on);
+    save(); render(); if (modal.open && $('.mhead h3', form)?.textContent.includes('Lembretes')) alertsModal();
+    toast(on ? `Paga em ${fmtDate(today())} ✓` : 'Pagamento desmarcado'); return;
   }
   const recv = t.closest('[data-recv]');
   if (recv) {
     const r = db.receivables.find(x => x.id === recv.dataset.recv);
     r.received = !r.received; r.receivedAt = r.received ? today() : null;
-    save(); render(); toast(r.received ? 'Recebido ✓' : 'Voltou para pendente'); return;
+    save(); render(); if (modal.open && $('.mhead h3', form)?.textContent.includes('Lembretes')) alertsModal();
+    toast(r.received ? 'Recebido ✓' : 'Voltou para pendente'); return;
   }
-  const chip = t.closest('[data-cat]'); if (chip) { state.catFilter = chip.dataset.cat || null; render(); return; }
-  const rf = t.closest('[data-recf]'); if (rf) { state.recFilter = rf.dataset.recf; render(); return; }
-  const ee = t.closest('[data-edit-exp]'); if (ee) return expenseForm(db.expenses.find(x => x.id === ee.dataset.editExp));
-  const er = t.closest('[data-edit-rec]'); if (er) return recForm(db.receivables.find(x => x.id === er.dataset.editRec));
+  const nw = t.closest('[data-new]'); if (nw) { closeModal(); return ({ exp: () => expenseForm(), rec: () => recForm(), inc: () => incomeForm() })[nw.dataset.new](); }
+  const chip = t.closest('[data-cat]'); if (chip) { state.catFilter = chip.dataset.cat || null; return render(); }
+  const rf = t.closest('[data-recf]'); if (rf) { state.recFilter = rf.dataset.recf; return render(); }
+  const df = t.closest('[data-despf]'); if (df) { state.despFilter = df.dataset.despf; return render(); }
+  const go = t.closest('[data-tab-go]'); if (go) { state.tab = go.dataset.tabGo; render(); return window.scrollTo(0, 0); }
+  const ee = t.closest('[data-edit-exp]'); if (ee) { closeModal(); return expenseForm(db.expenses.find(x => x.id === ee.dataset.editExp), ee.dataset.ym); }
+  const er = t.closest('[data-edit-rec]'); if (er) { closeModal(); return recForm(db.receivables.find(x => x.id === er.dataset.editRec)); }
   const ei = t.closest('[data-edit-inc]'); if (ei) return incomeForm(db.incomes.find(x => x.id === ei.dataset.editInc));
   const ce = t.closest('[data-cat-edit]'); if (ce) return catForm(db.cats.find(x => x.id === ce.dataset.catEdit));
   const act = t.closest('[data-act]'); if (!act) return;
   const a = act.dataset.act;
+  if (a === 'alerts') alertsModal();
+  if (a === 'newexp') expenseForm();
   if (a === 'newcat') catForm();
-  if (a === 'export') {
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob); link.download = `financas-backup-${today()}.json`; link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-  }
+  if (a === 'notifyon') enableNotifications().then(ok => { if (ok) { closeModal(); render(); } });
+  if (a === 'notifyoff') { db.settings.notify = false; save(); render(); toast('Notificações desativadas'); }
+  if (a === 'ics') exportICS();
+  if (a === 'export') download(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }), `financas-backup-${today()}.json`);
   if (a === 'import') {
     const inp = $('#importFile');
     inp.onchange = async () => {
@@ -536,16 +695,20 @@ $('#view').addEventListener('click', e => {
         const d = JSON.parse(await inp.files[0].text());
         if (!Array.isArray(d.expenses)) throw 0;
         if (!confirm('Substituir os dados atuais pelo backup?')) return;
-        db = Object.assign({ expenses: [], incomes: [], receivables: [], cats: DEFAULT_CATS }, d); save(); render(); toast('Backup importado');
+        db = normalize(d); save(); render(); toast('Backup importado');
       } catch (err) { toast('Arquivo inválido'); }
       inp.value = '';
     };
     inp.click();
   }
-  if (a === 'wipe' && confirm('Apagar TODOS os dados? Isso não pode ser desfeito.')) {
-    db = { expenses: [], incomes: [], receivables: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)) }; save(); render(); toast('Dados apagados');
-  }
+  if (a === 'wipe' && confirm('Apagar TODOS os dados? Isso não pode ser desfeito.')) { db = fresh(); save(); render(); toast('Dados apagados'); }
   if (a === 'install' && deferredInstall) { deferredInstall.prompt(); deferredInstall = null; render(); }
+}
+$('#view').addEventListener('click', handleClick);
+form.addEventListener('click', handleClick);
+$('#view').addEventListener('change', e => {
+  const s = e.target.closest('[data-setting]'); if (!s) return;
+  db.settings[s.dataset.setting] = Number(s.value); db.notified = {}; save(); render(); toast('Preferência salva');
 });
 
 /* ---------- PWA ---------- */
@@ -553,6 +716,11 @@ let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; if (state.tab === 'cfg') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', ev => { if (ev.data === 'open-alerts') alertsModal(); });
 }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); notifyDue(); } });
+if (location.hash === '#lembretes') setTimeout(alertsModal, 300);
 
 render();
+syncReminders();
+notifyDue();
