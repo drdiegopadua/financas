@@ -15,6 +15,17 @@ button{cursor:pointer}
 .topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:8px;
   padding:calc(12px + env(safe-area-inset-top,0px)) 16px 10px;background:rgba(30,52,86,.72);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 .avatar{width:42px;height:42px;border-radius:14px;box-shadow:0 6px 16px rgba(0,0,0,.25);flex:0 0 42px}
+.avatar-wrap{position:relative;flex:0 0 42px}
+.sync-dot{position:absolute;right:-3px;bottom:-3px;width:14px;height:14px;border-radius:50%;background:#22c55e;border:2px solid #213c63}
+.sync-dot[data-s="syncing"]{background:#f6c453;animation:pulse 1s infinite alternate}
+.sync-dot[data-s="error"]{background:#ef4444}
+.sync-dot[data-s="offline"]{background:#94a3b8}
+@keyframes pulse{to{opacity:.4}}
+.steps{margin:0 0 12px;padding-left:20px;display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--text)}
+.steps a{color:var(--blue)}
+.steps .btn{margin-top:6px;display:inline-block}
+.glass .f{color:var(--muted);margin-top:8px}
+.glass .f input{background:rgba(255,255,255,.95)}
 .month{display:flex;align-items:center;background:var(--glass);border:1px solid var(--gline);border-radius:999px;padding:3px}
 .month-label{background:none;border:0;padding:6px 6px;font-weight:600;min-width:118px;text-transform:capitalize;font-size:14px}
 .icon-btn{background:none;border:0;width:32px;height:32px;border-radius:50%;font-size:20px;color:var(--muted);display:grid;place-items:center}

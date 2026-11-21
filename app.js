@@ -34,8 +34,10 @@ function load() {
 }
 let db = load();
 function save() {
+  db.updatedAt = new Date().toISOString();
   try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { toast('Não foi possível salvar'); }
   syncReminders();
+  if (syncOn()) { sync.dirty = true; saveSync(); schedulePush(); }
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -211,6 +213,143 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1500);
 }
 
+/* ---------- Google Planilhas (banco de dados) ---------- */
+const SYNC_KEY = 'financas.sync';
+let sync = (() => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch (e) { return {}; } })();
+function saveSync() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch (e) { /* ignora */ } }
+function syncOn() { return !!(sync.url && sync.chave); }
+function newKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, b => 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 56]).join(''); }
+
+const FORMA = { unica: 'única', parcelada: 'parcelada', fixa: 'fixa' };
+const FORMA_R = { 'única': 'unica', unica: 'unica', 'à vista': 'unica', parcelada: 'parcelada', fixa: 'fixa', 'fixa mensal': 'fixa' };
+const simnao = b => b ? 'sim' : 'não';
+const isSim = v => v === true || /^(sim|s|true|1|x)$/i.test(String(v ?? '').trim());
+
+function toTables(d = db) {
+  return {
+    Despesas: d.expenses.map(e => ({ id: e.id, descricao: e.desc, tipo: cat(e.cat).name, tipo_id: e.cat, forma: FORMA[e.mode], valor: Number(e.amount) || 0, parcelas: e.n || 1, data: e.start, fim: e.end || '', pagamentos: JSON.stringify(e.paid || {}), obs: e.note || '', criado: e.created || '' })),
+    Entradas: d.incomes.map(i => ({ id: i.id, descricao: i.desc, valor: Number(i.amount) || 0, data: i.date, mensal: simnao(i.recurring), fim: i.end || '' })),
+    AReceber: d.receivables.map(r => ({ id: r.id, quem: r.who || '', descricao: r.desc, valor: Number(r.amount) || 0, previsao: r.due || '', recebido: simnao(r.received), recebido_em: r.receivedAt || '', obs: r.note || '' })),
+    Tipos: d.cats.map(c => ({ id: c.id, nome: c.name, icone: c.icon, cor: c.color })),
+    Config: [{ chave: 'atualizado_em', valor: d.updatedAt || '' }, { chave: 'avisar_dias_antes', valor: String(d.settings.daysBefore) }],
+  };
+}
+// converte o que veio da planilha para o formato do app (aceita linhas digitadas à mão, sem id)
+function fromTables(t) {
+  const s = v => v == null ? '' : String(v).trim(), num = v => typeof v === 'number' ? v : Number(s(v).replace(/\./g, '').replace(',', '.')) || 0;
+  let generated = false;
+  const id = v => { if (s(v)) return s(v); generated = true; return uid(); };
+  const cfg = Object.fromEntries((t.Config || []).map(r => [s(r.chave), s(r.valor)]));
+  const cats = (t.Tipos || []).filter(r => s(r.id) || s(r.nome)).map(r => ({ id: id(r.id), name: s(r.nome) || 'Sem nome', icon: s(r.icone) || '🏷️', color: s(r.cor) || '#64748b' }));
+  const catByName = n => (cats.find(c => c.name.toLowerCase() === n.toLowerCase()) || {}).id;
+  const data = {
+    cats: cats.length ? cats : JSON.parse(JSON.stringify(DEFAULT_CATS)),
+    expenses: (t.Despesas || []).filter(r => s(r.descricao) && s(r.data)).map(r => {
+      let paid = {}; try { paid = JSON.parse(s(r.pagamentos) || '{}') || {}; } catch (e) { /* ignora */ }
+      const mode = FORMA_R[s(r.forma).toLowerCase()] || 'unica';
+      return { id: id(r.id), desc: s(r.descricao), cat: s(r.tipo_id) || catByName(s(r.tipo)) || 'outros', mode, amount: num(r.valor), n: mode === 'parcelada' ? Math.max(2, parseInt(r.parcelas) || 2) : 1, start: s(r.data).slice(0, 10), end: s(r.fim).slice(0, 7) || null, paid, note: s(r.obs), created: s(r.criado).slice(0, 10) };
+    }),
+    incomes: (t.Entradas || []).filter(r => s(r.descricao) && s(r.data)).map(r => ({ id: id(r.id), desc: s(r.descricao), amount: num(r.valor), date: s(r.data).slice(0, 10), recurring: isSim(r.mensal), end: s(r.fim).slice(0, 7) || null })),
+    receivables: (t.AReceber || []).filter(r => s(r.descricao) || s(r.quem)).map(r => ({ id: id(r.id), who: s(r.quem), desc: s(r.descricao) || s(r.quem), amount: num(r.valor), due: s(r.previsao).slice(0, 10), received: isSim(r.recebido), receivedAt: isSim(r.recebido) ? (s(r.recebido_em).slice(0, 10) || today()) : null, note: s(r.obs) })),
+  };
+  return { data, updatedAt: cfg.atualizado_em || '', daysBefore: cfg.avisar_dias_antes, generated };
+}
+const canon = d => JSON.stringify(['expenses', 'incomes', 'receivables', 'cats'].map(k => d[k]));
+const hasData = d => d.expenses.length + d.incomes.length + d.receivables.length > 0;
+
+async function gsCall(acao, url = sync.url, chave = sync.chave) {
+  const body = { chave, acao };
+  if (acao === 'gravar') body.dados = toTables();
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  let j; try { j = await r.json(); } catch (e) { throw new Error('Resposta inválida — confira a URL e se o acesso está como "Qualquer pessoa"'); }
+  if (j.erro) throw new Error(j.erro);
+  if (j.planilha) sync.sheetUrl = j.planilha;
+  return j;
+}
+
+function applyRemote(remote) {
+  const keep = { settings: db.settings, notified: db.notified };
+  db = normalize({ ...remote.data, settings: keep.settings, notified: keep.notified, updatedAt: remote.updatedAt });
+  if (remote.daysBefore !== undefined && remote.daysBefore !== '') db.settings.daysBefore = Number(remote.daysBefore) || 0;
+  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { /* ignora */ }
+  syncReminders();
+}
+
+let pushTimer = null, syncing = false, syncAgain = false;
+function schedulePush() { clearTimeout(pushTimer); pushTimer = setTimeout(syncNow, 1200); }
+
+async function syncNow(manual) {
+  if (!syncOn()) return;
+  if (syncing) { syncAgain = true; return; }
+  if (!navigator.onLine) { sync.status = 'offline'; saveSync(); return; }
+  syncing = true; sync.status = 'syncing'; refreshSyncUI();
+  try {
+    const remote = fromTables((await gsCall('ler')).dados);
+    const local = fromTables(toTables());
+    const remoteChanged = canon(remote.data) !== canon(local.data);
+    if (sync.dirty && remoteChanged && remote.updatedAt > (db.updatedAt || '')) {
+      applyRemote(remote); sync.dirty = false; render(); // planilha mais nova (outro aparelho)
+    } else if (sync.dirty) {
+      await gsCall('gravar'); sync.dirty = false;
+    } else if (remoteChanged) {
+      applyRemote(remote); render();
+      if (remote.generated) await gsCall('gravar'); // grava ids das linhas digitadas na planilha
+    }
+    sync.last = new Date().toISOString(); sync.status = 'ok'; sync.error = '';
+    if (manual) toast('Sincronizado com a planilha ✓');
+  } catch (e) {
+    sync.status = 'error'; sync.error = e.message || 'Falha de conexão';
+    if (manual) toast('Erro: ' + sync.error);
+  } finally {
+    syncing = false; saveSync(); refreshSyncUI();
+    if (syncAgain) { syncAgain = false; syncNow(); }
+  }
+}
+
+async function connectSheets(url, chave) {
+  url = url.trim(); chave = chave.trim();
+  if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) return toast('Cole a URL do app da Web (script.google.com)');
+  if (chave.length < 8) return toast('Informe a chave');
+  toast('Conectando…');
+  try {
+    const remote = fromTables((await gsCall('ler', url, chave)).dados);
+    sync.url = url; sync.chave = chave; delete sync.pendingKey;
+    if (hasData(remote.data) && hasData(db)) {
+      if (confirm('A planilha já tem dados.\n\nOK = usar os dados da PLANILHA neste aparelho\nCancelar = enviar os dados DESTE aparelho para a planilha')) { applyRemote(remote); sync.dirty = false; }
+      else sync.dirty = true;
+    } else if (hasData(remote.data)) { applyRemote(remote); sync.dirty = !!remote.generated; }
+    else sync.dirty = true;
+    if (sync.dirty && !db.updatedAt) { db.updatedAt = new Date().toISOString(); localStorage.setItem(KEY, JSON.stringify(db)); }
+    saveSync();
+    await syncNow();
+    render(); toast(sync.status === 'ok' ? 'Planilha conectada ✓' : 'Erro: ' + sync.error);
+  } catch (e) { toast('Não conectou: ' + (e.message || 'verifique a URL')); }
+}
+
+async function copyScript() {
+  if (!sync.chave && !sync.pendingKey) { sync.pendingKey = newKey(); saveSync(); }
+  const key = sync.chave || sync.pendingKey;
+  let code;
+  try { code = (await (await fetch('apps-script.gs', { cache: 'no-store' })).text()).replace('__CHAVE__', key); }
+  catch (e) { return toast('Sem internet para baixar o script'); }
+  try { await navigator.clipboard.writeText(code); toast('Código copiado ✓ — cole no Apps Script'); }
+  catch (e) {
+    openModal(`${head('Código do script')}<p class="muted" style="color:var(--ink2);margin:0">Selecione tudo e copie:</p>
+      <label class="f"><textarea rows="12" readonly style="font:12px monospace">${esc(code)}</textarea></label>`);
+  }
+}
+
+function syncLabel() {
+  if (!syncOn()) return 'Não conectado — dados só neste aparelho';
+  const when = sync.last ? new Date(sync.last).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+  return { syncing: 'Sincronizando…', offline: 'Sem internet — envia quando voltar', error: `⚠️ ${sync.error}` }[sync.status] || `Conectado ✓ · última sincronização ${when}`;
+}
+function refreshSyncUI() {
+  const el = $('#syncStatus'); if (el) el.textContent = syncLabel();
+  const dot = $('#syncDot');
+  if (dot) { dot.hidden = !syncOn(); dot.dataset.s = sync.status || 'ok'; }
+}
+
 function updateBell() {
   const n = dueAlerts().length + recAlerts().length, b = $('#bellBadge');
   b.hidden = !n; b.textContent = n > 9 ? '9+' : n;
@@ -326,7 +465,7 @@ function render() {
   $('#fabTxt').textContent = { dash: 'Adicionar', desp: 'Nova despesa', rec: 'Novo a receber', ent: 'Nova entrada' }[state.tab] || '';
   $$('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
   $('#view').innerHTML = ({ dash: viewDash, desp: viewDesp, rec: viewRec, ent: viewEnt, cfg: viewCfg })[state.tab]();
-  updateBell();
+  updateBell(); refreshSyncUI();
 }
 
 function alertBar() {
@@ -442,7 +581,25 @@ function viewEnt() {
 function viewCfg() {
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
   const on = db.settings.notify && perm === 'granted';
+  const key = sync.chave || sync.pendingKey || (sync.pendingKey = newKey(), saveSync(), sync.pendingKey);
+  const gs = syncOn() ? `
+    <div class="cfg-row"><span class="n">Status<br><span class="muted" id="syncStatus">${esc(syncLabel())}</span></span>
+      <button class="btn sm primary" data-act="gs-sync">↻ Sincronizar</button></div>
+    <div class="cfg-row"><span class="n">Chave (use no outro aparelho)<br><span class="muted" style="font-family:monospace;user-select:all">${esc(sync.chave)}</span></span></div>
+    <div class="actions" style="margin-top:8px">${sync.sheetUrl ? `<a class="btn" style="text-align:center;text-decoration:none" href="${esc(sync.sheetUrl)}" target="_blank" rel="noopener">📄 Abrir planilha</a>` : ''}<button class="btn danger" data-act="gs-off">Desconectar</button></div>`
+    : `
+    <p class="muted" style="margin-top:0">Guarde tudo numa planilha sua no Google Drive e use o app em vários aparelhos. Faça uma vez:</p>
+    <ol class="steps">
+      <li>Crie uma planilha em branco: <a href="https://sheets.new" target="_blank" rel="noopener">sheets.new</a> (dê o nome "Minhas Finanças").</li>
+      <li>Na planilha: <b>Extensões → Apps Script</b>. Apague o que tiver e cole o código: <button class="btn sm primary" data-act="gs-copy">📋 Copiar código</button></li>
+      <li>Salve 💾 e clique <b>Implantar → Nova implantação</b> → ⚙️ <b>App da Web</b>. Executar como: <b>Eu</b> · Quem pode acessar: <b>Qualquer pessoa</b> → <b>Implantar</b> e autorize.</li>
+      <li>Copie a <b>URL do app da Web</b> e cole aqui:</li>
+    </ol>
+    <label class="f gsf">URL do app da Web<input id="gsUrl" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+    <label class="f gsf">Chave (já está no código copiado; em outro aparelho, use a mesma)<input id="gsKey" value="${esc(key)}" autocomplete="off"></label>
+    <div class="actions" style="margin-top:10px"><button class="btn primary" data-act="gs-connect">Conectar planilha</button></div>`;
   return `<div class="title">Ajustes</div>
+  <h2>📊 Google Planilhas</h2><div class="glass">${gs}</div>
   <h2>🔔 Lembretes de pagamento</h2><div class="glass">
     <div class="cfg-row"><span class="n">Avisar</span><select data-setting="daysBefore">${[[0, 'no dia do vencimento'], [1, '1 dia antes'], [2, '2 dias antes'], [3, '3 dias antes'], [5, '5 dias antes'], [7, '7 dias antes']].map(([v, l]) => `<option value="${v}" ${Number(db.settings.daysBefore) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="cfg-row"><span class="n">Notificações no celular<br><span class="muted">${on ? 'Ativadas ✓' : perm === 'denied' ? 'Bloqueadas nas configurações do navegador' : perm === 'unsupported' ? 'Não suportado aqui — use o calendário' : 'Desativadas'}</span></span>
@@ -702,6 +859,10 @@ function handleClick(e) {
   if (a === 'notifyon') enableNotifications().then(ok => { if (ok) { closeModal(); render(); } });
   if (a === 'notifyoff') { db.settings.notify = false; save(); render(); toast('Notificações desativadas'); }
   if (a === 'ics') exportICS();
+  if (a === 'gs-copy') copyScript();
+  if (a === 'gs-connect') connectSheets($('#gsUrl').value, $('#gsKey').value);
+  if (a === 'gs-sync') syncNow(true);
+  if (a === 'gs-off' && confirm('Desconectar da planilha? Os dados continuam na planilha e neste aparelho.')) { sync = {}; saveSync(); render(); toast('Planilha desconectada'); }
   if (a === 'export') download(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }), `financas-backup-${today()}.json`);
   if (a === 'import') {
     const inp = $('#importFile');
@@ -733,9 +894,11 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('message', ev => { if (ev.data === 'open-alerts') alertsModal(); });
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); notifyDue(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); notifyDue(); syncNow(); } });
+window.addEventListener('online', () => syncNow());
 if (location.hash === '#lembretes') setTimeout(alertsModal, 300);
 
 render();
 syncReminders();
 notifyDue();
+syncNow();
