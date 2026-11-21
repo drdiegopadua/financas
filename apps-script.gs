@@ -11,6 +11,11 @@
  * A CHAVE abaixo protege seus dados: só quem tem a URL + a chave consegue ler ou gravar.
  */
 const CHAVE = '__CHAVE__';
+// ID da planilha (opcional). Se ficar como está, usa a planilha onde o script foi criado.
+const PLANILHA_ID = '__PLANILHA__';
+function planilha() {
+  return PLANILHA_ID.indexOf('__') === 0 ? SpreadsheetApp.getActive() : SpreadsheetApp.openById(PLANILHA_ID);
+}
 
 const ABAS = {
   Despesas: ['id', 'descricao', 'tipo', 'tipo_id', 'forma', 'valor', 'parcelas', 'data', 'fim', 'pagamentos', 'obs', 'criado'],
@@ -33,20 +38,25 @@ function doPost(e) {
   lock.waitLock(20000);
   try {
     if (corpo.acao === 'gravar') gravarTudo(corpo.dados || {});
-    return resposta({ ok: true, dados: lerTudo(), planilha: SpreadsheetApp.getActive().getUrl() });
+    return resposta({ ok: true, dados: lerTudo(), planilha: planilha().getUrl() });
   } finally {
     lock.releaseLock();
   }
 }
 
 function aba(nome) {
-  const ss = SpreadsheetApp.getActive();
+  const ss = planilha();
   let sh = ss.getSheetByName(nome);
   if (!sh) {
     sh = ss.insertSheet(nome);
     const cab = ABAS[nome];
     sh.getRange(1, 1, 1, cab.length).setValues([cab]).setFontWeight('bold').setBackground('#1e3a63').setFontColor('#ffffff');
     sh.setFrozenRows(1);
+    // remove a aba vazia padrão ("Página1"/"Sheet1")
+    ['Página1', 'Planilha1', 'Sheet1'].forEach(n => {
+      const p = ss.getSheetByName(n);
+      if (p && p.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(p);
+    });
   }
   return sh;
 }
