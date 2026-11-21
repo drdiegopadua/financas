@@ -20,7 +20,7 @@ const DEFAULT_SETTINGS = { notify: false, daysBefore: 1 };
 
 /* ---------- dados ---------- */
 function fresh() {
-  return { expenses: [], incomes: [], receivables: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), settings: { ...DEFAULT_SETTINGS }, notified: {} };
+  return { expenses: [], incomes: [], receivables: [], goals: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), settings: { ...DEFAULT_SETTINGS }, notified: {} };
 }
 function normalize(d) {
   const db = Object.assign(fresh(), d);
@@ -231,12 +231,16 @@ function toTables(d = db) {
     Entradas: d.incomes.map(i => ({ id: i.id, descricao: i.desc, valor: Number(i.amount) || 0, data: i.date, mensal: simnao(i.recurring), fim: i.end || '' })),
     AReceber: d.receivables.map(r => ({ id: r.id, quem: r.who || '', descricao: r.desc, valor: Number(r.amount) || 0, previsao: r.due || '', recebido: simnao(r.received), recebido_em: r.receivedAt || '', obs: r.note || '' })),
     Tipos: d.cats.map(c => ({ id: c.id, nome: c.name, icone: c.icon, cor: c.color })),
+    Metas: (d.goals || []).map(g => ({ id: g.id, nome: g.name, icone: g.icon, valor_meta: Number(g.target) || 0, por_mes: Number(g.monthly) || 0, inicio: g.start, obs: g.note || '' })),
+    Depositos: (d.goals || []).flatMap(g => (g.deposits || []).map(x => ({ id: x.id, meta_id: g.id, meta: g.name, data: x.date, valor: Number(x.amount) || 0, obs: x.note || '' }))),
     Config: [{ chave: 'atualizado_em', valor: d.updatedAt || '' }, { chave: 'avisar_dias_antes', valor: String(d.settings.daysBefore) }],
   };
 }
 // converte o que veio da planilha para o formato do app (aceita linhas digitadas à mão, sem id)
 function fromTables(t) {
-  const s = v => v == null ? '' : String(v).trim(), num = v => typeof v === 'number' ? v : Number(s(v).replace(/\./g, '').replace(',', '.')) || 0;
+  const s = v => v == null ? '' : String(v).trim();
+  // aceita 1500 · "1500.5" · "1.500,50" (digitado no formato brasileiro)
+  const num = v => typeof v === 'number' ? v : (s(v).includes(',') ? Number(s(v).replace(/\./g, '').replace(',', '.')) : Number(s(v).replace(/[^\d.-]/g, ''))) || 0;
   let generated = false;
   const id = v => { if (s(v)) return s(v); generated = true; return uid(); };
   const cfg = Object.fromEntries((t.Config || []).map(r => [s(r.chave), s(r.valor)]));
@@ -252,10 +256,16 @@ function fromTables(t) {
     incomes: (t.Entradas || []).filter(r => s(r.descricao) && s(r.data)).map(r => ({ id: id(r.id), desc: s(r.descricao), amount: num(r.valor), date: s(r.data).slice(0, 10), recurring: isSim(r.mensal), end: s(r.fim).slice(0, 7) || null })),
     receivables: (t.AReceber || []).filter(r => s(r.descricao) || s(r.quem)).map(r => ({ id: id(r.id), who: s(r.quem), desc: s(r.descricao) || s(r.quem), amount: num(r.valor), due: s(r.previsao).slice(0, 10), received: isSim(r.recebido), receivedAt: isSim(r.recebido) ? (s(r.recebido_em).slice(0, 10) || today()) : null, note: s(r.obs) })),
   };
+  data.goals = (t.Metas || []).filter(r => s(r.nome)).map(r => ({ id: id(r.id), name: s(r.nome), icon: s(r.icone) || '🎯', target: num(r.valor_meta), monthly: num(r.por_mes), start: s(r.inicio).slice(0, 7) || curYM(), note: s(r.obs), deposits: [] }));
+  for (const r of (t.Depositos || [])) {
+    const g = data.goals.find(x => x.id === s(r.meta_id)) || data.goals.find(x => x.name.toLowerCase() === s(r.meta).toLowerCase());
+    if (g && s(r.data)) g.deposits.push({ id: id(r.id), date: s(r.data).slice(0, 10), amount: num(r.valor), note: s(r.obs) });
+  }
+  data.goals.forEach(g => g.deposits.sort((a, b) => a.date.localeCompare(b.date)));
   return { data, updatedAt: cfg.atualizado_em || '', daysBefore: cfg.avisar_dias_antes, generated };
 }
-const canon = d => JSON.stringify(['expenses', 'incomes', 'receivables', 'cats'].map(k => d[k]));
-const hasData = d => d.expenses.length + d.incomes.length + d.receivables.length > 0;
+const canon = d => JSON.stringify(['expenses', 'incomes', 'receivables', 'cats', 'goals'].map(k => d[k] || []));
+const hasData = d => d.expenses.length + d.incomes.length + d.receivables.length + (d.goals || []).length > 0;
 
 async function gsCall(acao, url = sync.url, chave = sync.chave) {
   const body = { chave, acao };
@@ -477,11 +487,11 @@ function donut(cats, total) {
 /* ---------- telas ---------- */
 function render() {
   $('#monthLabel').textContent = ymLabel(state.ym, true);
-  $('#monthNav').style.visibility = ['rec', 'cfg'].includes(state.tab) ? 'hidden' : 'visible';
+  $('#monthNav').style.visibility = ['rec', 'cfg', 'meta'].includes(state.tab) ? 'hidden' : 'visible';
   $('#fab').classList.toggle('hide', state.tab === 'cfg');
-  $('#fabTxt').textContent = { dash: 'Adicionar', desp: 'Nova despesa', rec: 'Novo a receber', ent: 'Nova entrada' }[state.tab] || '';
+  $('#fabTxt').textContent = { dash: 'Adicionar', desp: 'Nova despesa', rec: 'Novo a receber', ent: 'Nova entrada', meta: 'Nova meta' }[state.tab] || '';
   $$('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
-  $('#view').innerHTML = ({ dash: viewDash, desp: viewDesp, rec: viewRec, ent: viewEnt, cfg: viewCfg })[state.tab]();
+  $('#view').innerHTML = ({ dash: viewDash, desp: viewDesp, rec: viewRec, ent: viewEnt, meta: viewMetas, cfg: viewCfg })[state.tab]();
   updateBell(); refreshSyncUI();
 }
 
@@ -507,7 +517,7 @@ function viewDash() {
     <div class="pcard ${s.sobra < 0 ? 'neg' : ''}"><span class="chip-ic">▦</span>
       <div class="lbl">${s.sobra < 0 ? 'Faltando em' : 'Sobrando em'}</div><div class="nm" style="text-transform:capitalize">${ymLabel(state.ym, true)}</div>
       <div class="amt">${money(Math.abs(s.sobra))}</div>
-      <div class="delta">${usedPct}% da renda gasta</div></div>
+      <div class="delta">${usedPct}% da renda gasta</div>${plannedSavings(state.ym) > 0 ? `<div class="delta">🐷 guardar ${money0(plannedSavings(state.ym))} · livre ${money0(s.sobra - plannedSavings(state.ym))}</div>` : ''}</div>
   </section>
   <section class="pills">
     <button class="pill" data-act="newexp"><span class="circ">↗</span><b>Despesa</b></button>
@@ -530,6 +540,7 @@ function viewDash() {
   out += pendRec.length ? pendRec.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).slice(0, 4).map(recRow).join('') : '<div class="empty"><b>🤝</b>Ninguém te deve no momento</div>';
   out += `</section>`;
 
+  if ((db.goals || []).length) out += `<h2>Metas <button class="link" data-tab-go="meta">Ver todas ›</button></h2><div class="glass">${db.goals.map(g => { const sv = goalSaved(g), p = g.target ? Math.min(100, sv / g.target * 100) : 0; return `<div class="mini-goal" data-tab-go="meta"><div><span>${esc(g.icon)} ${esc(g.name)}</span><b>${money0(sv)} de ${money0(g.target)}</b></div><div class="goal-bar"><i style="width:${p.toFixed(1)}%"></i></div></div>`; }).join('')}</div>`;
   out += `<h2>Resumo de ${ymLabel(state.ym)}</h2><div class="grid">
     <div class="stat"><div class="lbl">Já pago</div><div class="val pos">${money(s.pago)}</div></div>
     <div class="stat"><div class="lbl">Parcelas futuras</div><div class="val">${money(futureInstallmentsTotal())}</div><div class="muted">após este mês</div></div></div>`;
@@ -578,6 +589,151 @@ function viewRec() {
     <div class="seg" style="margin:14px 0"><button class="${state.recFilter === 'pend' ? 'on' : ''}" data-recf="pend">Pendentes (${pend.length})</button><button class="${state.recFilter === 'done' ? 'on' : ''}" data-recf="done">Recebidos (${done.length})</button></div>
     <section class="sheet"><div class="cols" style="margin-top:0"><span>Quem deve</span><span>Valor</span></div>
     ${list.length ? list.map(recRow).join('') : `<div class="empty"><b>🤝</b>${state.recFilter === 'pend' ? 'Ninguém te deve nada por aqui.' : 'Nenhum recebimento ainda.'}</div>`}</section>`;
+}
+
+/* ---------- metas (guardar dinheiro) ---------- */
+const goalSaved = g => (g.deposits || []).reduce((a, d) => a + cents(d.amount), 0) / 100;
+const goalSavedIn = (g, ym) => (g.deposits || []).filter(d => ymOf(d.date) === ym).reduce((a, d) => a + cents(d.amount), 0) / 100;
+const goalDone = g => goalSaved(g) >= Number(g.target) - 0.005;
+// mês previsto para concluir, guardando o valor mensal a partir do próximo mês ainda não guardado
+function goalEnd(g) {
+  const left = Number(g.target) - goalSaved(g);
+  if (left <= 0) return null;
+  if (!(Number(g.monthly) > 0)) return '';
+  let m = g.start > curYM() ? g.start : curYM();
+  if (goalSavedIn(g, m) >= Number(g.monthly)) m = addMonths(m, 1);
+  return addMonths(m, Math.ceil(left / Number(g.monthly)) - 1);
+}
+// quanto as metas pedem para guardar em um mês (planejado)
+const plannedSavings = ym => (db.goals || []).filter(g => !goalDone(g) && g.start <= ym).reduce((a, g) => a + (Number(g.monthly) || 0), 0);
+// média da sobra mensal (entradas − despesas) nos próximos meses
+function avgSobra(fromYM, n = 12) {
+  let t = 0; for (let i = 0; i < n; i++) t += summary(addMonths(fromYM, i)).sobra;
+  return t / n;
+}
+function savingOptions(target, fromYM) {
+  const media = avgSobra(fromYM), menor = Math.min(...Array.from({ length: 12 }, (_, i) => summary(addMonths(fromYM, i)).sobra));
+  const opts = [[.2, 'Tranquilo'], [.3, 'Equilibrado'], [.4, 'Acelerado'], [.5, 'Puxado']].map(([p, label]) => {
+    const v = Math.max(50, Math.round(media * p / 50) * 50);
+    const meses = Math.ceil(target / v);
+    return { v, label, pct: Math.round(p * 100), meses, fim: addMonths(fromYM, meses - 1), aperta: v > menor };
+  });
+  return { media, menor, opts };
+}
+
+function goalCard(g) {
+  const saved = goalSaved(g), target = Number(g.target) || 0, pct = target ? Math.min(100, saved / target * 100) : 0;
+  const end = goalEnd(g), cm = curYM(), inMonth = goalSavedIn(g, cm), started = g.start <= cm;
+  let status;
+  if (goalDone(g)) status = '<span class="tag ok">🎉 Meta alcançada!</span>';
+  else if (!started) status = `<span class="tag">começa em ${ymLabel(g.start, true)}</span>`;
+  else if (inMonth >= Number(g.monthly)) status = `<span class="tag ok">✓ ${money(inMonth)} guardado em ${ymLabel(cm)}</span>`;
+  else status = `<span class="tag soon">falta guardar ${money(Number(g.monthly) - inMonth)} em ${ymLabel(cm)}</span>`;
+  const last = (g.deposits || []).slice(-4).reverse();
+  return `<section class="goal" data-edit-goal="${g.id}">
+    <div class="goal-top"><div class="goal-ic">${esc(g.icon || '🎯')}</div>
+      <div class="mid"><div class="t">${esc(g.name)}</div><div class="sub">${money(Number(g.monthly) || 0)}/mês${end ? ` · conclui em ${ymLabel(end, true)}` : ''}</div></div>
+      ${goalDone(g) ? '' : `<button class="pay" data-save-goal="${g.id}">Guardar</button>`}</div>
+    <div class="goal-amt"><b>${money(saved)}</b> <span>de ${money(target)}</span></div>
+    <div class="goal-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <div class="goal-foot"><span>${pct.toFixed(0)}%</span>${status}</div>
+    ${last.length ? `<div class="goal-hist">${last.map(d => `<div><span>${fmtDate(d.date)}${d.note ? ` · ${esc(d.note)}` : ''}</span><b class="${d.amount < 0 ? 'neg-t' : 'pos'}">${d.amount < 0 ? '−' : '+'} ${money(Math.abs(d.amount))}</b></div>`).join('')}</div>` : ''}
+  </section>`;
+}
+
+function viewMetas() {
+  const goals = db.goals || [];
+  const total = goals.reduce((a, g) => a + goalSaved(g), 0), plano = plannedSavings(curYM());
+  let h = `<div class="title">Metas</div>`;
+  if (!goals.length) {
+    const s = savingOptions(10000, addMonths(curYM(), 1));
+    return h + `<div class="glass"><div class="empty"><b>🐷</b>Junte dinheiro para seus objetivos: viagem, reserva de emergência, carro…<br><br>
+      Pelas suas contas, sobram em média <b style="display:inline;font-size:inherit">${money(s.media)}</b> por mês.</div>
+      <div class="actions"><button class="btn primary" data-act="newgoal">+ Criar meta</button></div></div>`;
+  }
+  h += `<div class="grid"><div class="stat"><div class="lbl">Total guardado</div><div class="val pos">${money(total)}</div></div>
+    <div class="stat"><div class="lbl">Plano deste mês</div><div class="val">${money(plano)}</div></div></div>`;
+  return h + goals.map(goalCard).join('');
+}
+
+function goalForm(g) {
+  const isNew = !g;
+  g = g || { name: '', icon: '✈️', target: '', monthly: '', start: addMonths(curYM(), 1), note: '', deposits: [] };
+  let icon = g.icon;
+  const ICONS = ['✈️', '🏖️', '🛟', '🚗', '🏠', '🎓', '💍', '🎮', '🐷', '🎯'];
+  openModal(`${head(isNew ? 'Nova meta' : 'Editar meta')}
+    <label class="f">Para que é?<input name="name" required maxlength="40" placeholder="Ex.: Viagem, Reserva de emergência" value="${esc(g.name)}"></label>
+    <div class="f">Ícone<div class="icons">${ICONS.map(i => `<button type="button" data-i="${i}" class="${i === icon ? 'on' : ''}">${i}</button>`).join('')}</div></div>
+    <div class="row2">
+      <label class="f">Quanto quer juntar (R$)<input name="target" type="number" step="0.01" min="1" inputmode="decimal" required value="${g.target}"></label>
+      <label class="f">Começar a guardar em<input name="start" type="month" required value="${g.start}"></label>
+    </div>
+    <div class="box"><div class="hd">💡 Sugestão pelo que você recebe</div><div id="sugBox"></div></div>
+    <label class="f">Quanto guardar por mês (R$)<input name="monthly" type="number" step="0.01" min="1" inputmode="decimal" required value="${g.monthly}"></label>
+    <div class="preview" id="goalPrev"></div>
+    <label class="f">Observação<input name="note" maxlength="100" value="${esc(g.note || '')}"></label>
+    <div class="actions"><button type="submit" class="btn primary">Salvar meta</button></div>
+    ${isNew ? '' : '<div class="actions"><button type="button" class="btn danger" data-del>Excluir meta</button></div>'}
+  `, () => {
+    const f = form;
+    const upd = () => {
+      const target = Number(f.target.value) || 0, start = f.start.value || curYM(), saved = isNew ? 0 : goalSaved(g);
+      const left = Math.max(0, target - saved);
+      if (target > 0) {
+        const s = savingOptions(left || target, start);
+        $('#sugBox', f).innerHTML = `<p class="muted" style="margin:0;color:var(--ink2)">Sobra média de <b>${money(s.media)}</b>/mês (o mês mais apertado sobra ${money(s.menor)}). Toque para escolher:</p>
+          <div class="sugs">${s.opts.map(o => `<button type="button" data-v="${o.v}" class="${Number(f.monthly.value) === o.v ? 'on' : ''}"><b>${money(o.v)}</b><span>${o.label} · ${o.pct}% da sobra</span><span>${o.meses} meses → ${ymLabel(o.fim, true)}${o.aperta ? ' ⚠️' : ''}</span></button>`).join('')}</div>
+          ${s.opts.some(o => o.aperta) ? '<p class="muted" style="margin:6px 0 0;color:var(--ink2)">⚠️ = maior que a sobra do mês mais apertado</p>' : ''}`;
+      } else $('#sugBox', f).innerHTML = '<p class="muted" style="margin:0;color:var(--ink2)">Informe quanto quer juntar.</p>';
+      const m = Number(f.monthly.value) || 0;
+      if (target > 0 && m > 0) {
+        const meses = Math.ceil(left / m);
+        $('#goalPrev', f).innerHTML = left ? `Guardando <b>${money(m)}</b>/mês, você junta ${money(left)} em <b>${meses} ${meses > 1 ? 'meses' : 'mês'}</b> — <b>${ymLabel(addMonths(start > curYM() ? start : curYM(), meses - 1), true)}</b>.` : 'Meta já alcançada 🎉';
+      } else $('#goalPrev', f).textContent = '';
+    };
+    $('.icons', f).onclick = ev => { const b = ev.target.closest('button'); if (b) { icon = b.dataset.i; $$('.icons button', f).forEach(x => x.classList.toggle('on', x === b)); } };
+    f.addEventListener('click', ev => { const b = ev.target.closest('.sugs button'); if (b) { f.monthly.value = b.dataset.v; upd(); } });
+    f.oninput = upd; f.onchange = upd; upd();
+    f.onsubmit = ev => {
+      ev.preventDefault();
+      const data = { name: f.name.value.trim(), icon, target: Number(f.target.value), monthly: Number(f.monthly.value), start: f.start.value, note: f.note.value.trim() };
+      if (!(data.target > 0) || !(data.monthly > 0)) return toast('Informe os valores');
+      if (isNew) { db.goals = db.goals || []; db.goals.push({ id: uid(), deposits: [], ...data }); }
+      else Object.assign(db.goals.find(x => x.id === g.id), data);
+      save(); closeModal(); state.tab = 'meta'; render(); toast(isNew ? 'Meta criada 🎯' : 'Meta atualizada');
+    };
+    const del = $('[data-del]', f);
+    if (del) del.onclick = () => { if (!confirm(`Excluir a meta "${g.name}" e todo o histórico (${money(goalSaved(g))} guardados)?`)) return; db.goals = db.goals.filter(x => x.id !== g.id); save(); closeModal(); render(); toast('Meta excluída'); };
+  });
+}
+
+function depositForm(g) {
+  const falta = Math.max(0, (Number(g.monthly) || 0) - goalSavedIn(g, curYM()));
+  let kind = 'in';
+  openModal(`${head(`${esc(g.icon || '🎯')} ${esc(g.name)}`)}
+    <div class="seg" id="segDep"><button type="button" data-k="in" class="on">Guardar</button><button type="button" data-k="out">Retirar</button></div>
+    <div class="row2">
+      <label class="f">Valor (R$)<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${falta || g.monthly}"></label>
+      <label class="f">Data<input name="date" type="date" required value="${today()}"></label>
+    </div>
+    <label class="f">Observação<input name="note" maxlength="60" placeholder="Ex.: poupança Nubank"></label>
+    <p class="muted" style="margin:0;color:var(--ink2)">Guardado até agora: <b>${money(goalSaved(g))}</b> de ${money(g.target)}</p>
+    <div class="actions"><button type="submit" class="btn primary" id="depBtn">Guardar</button></div>
+  `, () => {
+    const f = form;
+    $('#segDep', f).onclick = ev => { const b = ev.target.closest('button'); if (!b) return; kind = b.dataset.k; $$('#segDep button', f).forEach(x => x.classList.toggle('on', x === b)); $('#depBtn', f).textContent = kind === 'in' ? 'Guardar' : 'Retirar'; };
+    f.onsubmit = ev => {
+      ev.preventDefault();
+      const v = Number(f.amount.value);
+      if (!(v > 0)) return toast('Informe o valor');
+      const obj = db.goals.find(x => x.id === g.id);
+      obj.deposits = obj.deposits || [];
+      obj.deposits.push({ id: uid(), date: f.date.value || today(), amount: kind === 'in' ? v : -v, note: f.note.value.trim() });
+      obj.deposits.sort((a, b) => a.date.localeCompare(b.date));
+      save(); closeModal(); render();
+      toast(kind === 'in' ? (goalDone(obj) ? 'Meta alcançada! 🎉' : `Guardado ${money(v)} 🐷`) : `Retirado ${money(v)}`);
+    };
+  });
 }
 
 // mês vazio: avisa se há entradas em outro mês (ex.: salário que começa no mês seguinte)
@@ -844,6 +1000,7 @@ function addMenu() {
       <div class="row" data-new="exp" role="button"><div class="ic">💸</div><div class="mid"><div class="t">Despesa</div><div class="sub">Única, parcelada ou fixa mensal</div></div><span>›</span></div>
       <div class="row" data-new="rec" role="button"><div class="ic">🤝</div><div class="mid"><div class="t">Dinheiro a receber</div><div class="sub">Alguém te deve / valor previsto</div></div><span>›</span></div>
       <div class="row" data-new="inc" role="button"><div class="ic">💰</div><div class="mid"><div class="t">Entrada / renda</div><div class="sub">Salário e outras receitas</div></div><span>›</span></div>
+      <div class="row" data-new="goal" role="button"><div class="ic">🐷</div><div class="mid"><div class="t">Meta para guardar dinheiro</div><div class="sub">Viagem, reserva, carro…</div></div><span>›</span></div>
     </div>`);
 }
 
@@ -854,7 +1011,7 @@ $('#monthNav').onclick = e => {
   const d = Number(b.dataset.month); state.ym = d === 0 ? curYM() : addMonths(state.ym, d); render();
 };
 $('#bell').onclick = alertsModal;
-$('#fab').onclick = () => ({ rec: recForm, ent: incomeForm, desp: () => expenseForm() })[state.tab]?.() ?? addMenu();
+$('#fab').onclick = () => ({ rec: recForm, ent: incomeForm, desp: () => expenseForm(), meta: () => goalForm() })[state.tab]?.() ?? addMenu();
 
 function handleClick(e) {
   const t = e.target;
@@ -874,12 +1031,14 @@ function handleClick(e) {
     save(); render(); if (modal.open && $('.mhead h3', form)?.textContent.includes('Lembretes')) alertsModal();
     toast(r.received ? 'Recebido ✓' : 'Voltou para pendente'); return;
   }
-  const nw = t.closest('[data-new]'); if (nw) { closeModal(); return ({ exp: () => expenseForm(), rec: () => recForm(), inc: () => incomeForm() })[nw.dataset.new](); }
+  const nw = t.closest('[data-new]'); if (nw) { closeModal(); return ({ exp: () => expenseForm(), rec: () => recForm(), inc: () => incomeForm(), goal: () => goalForm() })[nw.dataset.new](); }
   const chip = t.closest('[data-cat]'); if (chip) { state.catFilter = chip.dataset.cat || null; return render(); }
   const rf = t.closest('[data-recf]'); if (rf) { state.recFilter = rf.dataset.recf; return render(); }
   const df = t.closest('[data-despf]'); if (df) { state.despFilter = df.dataset.despf; return render(); }
   const gm = t.closest('[data-goto]'); if (gm) { state.ym = gm.dataset.goto; return render(); }
   const go = t.closest('[data-tab-go]'); if (go) { state.tab = go.dataset.tabGo; render(); return window.scrollTo(0, 0); }
+  const sg = t.closest('[data-save-goal]'); if (sg) return depositForm(db.goals.find(x => x.id === sg.dataset.saveGoal));
+  const eg = t.closest('[data-edit-goal]'); if (eg) return goalForm(db.goals.find(x => x.id === eg.dataset.editGoal));
   const ee = t.closest('[data-edit-exp]'); if (ee) { closeModal(); return expenseForm(db.expenses.find(x => x.id === ee.dataset.editExp), ee.dataset.ym); }
   const er = t.closest('[data-edit-rec]'); if (er) { closeModal(); return recForm(db.receivables.find(x => x.id === er.dataset.editRec)); }
   const ei = t.closest('[data-edit-inc]'); if (ei) return incomeForm(db.incomes.find(x => x.id === ei.dataset.editInc));
@@ -889,6 +1048,7 @@ function handleClick(e) {
   if (a === 'alerts') alertsModal();
   if (a === 'newexp') expenseForm();
   if (a === 'newcat') catForm();
+  if (a === 'newgoal') goalForm();
   if (a === 'notifyon') enableNotifications().then(ok => { if (ok) { closeModal(); render(); } });
   if (a === 'notifyoff') { db.settings.notify = false; save(); render(); toast('Notificações desativadas'); }
   if (a === 'ics') exportICS();

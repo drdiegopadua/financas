@@ -22,8 +22,11 @@ const ABAS = {
   Entradas: ['id', 'descricao', 'valor', 'data', 'mensal', 'fim'],
   AReceber: ['id', 'quem', 'descricao', 'valor', 'previsao', 'recebido', 'recebido_em', 'obs'],
   Tipos: ['id', 'nome', 'icone', 'cor'],
+  Metas: ['id', 'nome', 'icone', 'valor_meta', 'por_mes', 'inicio', 'obs'],
+  Depositos: ['id', 'meta_id', 'meta', 'data', 'valor', 'obs'],
   Config: ['chave', 'valor'],
 };
+const MOEDA = ['valor', 'valor_meta', 'por_mes'];
 
 function doGet() {
   return resposta({ ok: true, app: 'Minhas Finanças', msg: 'Script funcionando. Cole esta URL no app.' });
@@ -90,7 +93,7 @@ function gravarTudo(dados) {
     if (!linhas.length) return;
     // datas e textos como texto puro (evita o Sheets converter "2026-11" em data)
     cab.forEach((c, i) => {
-      sh.getRange(2, i + 1, linhas.length, 1).setNumberFormat(c === 'valor' ? '#,##0.00' : c === 'parcelas' ? '0' : '@');
+      sh.getRange(2, i + 1, linhas.length, 1).setNumberFormat(MOEDA.indexOf(c) >= 0 ? '#,##0.00' : c === 'parcelas' ? '0' : '@');
     });
     sh.getRange(2, 1, linhas.length, cab.length).setValues(linhas.map(o => cab.map(c => (o[c] === undefined || o[c] === null) ? '' : o[c])));
   });
