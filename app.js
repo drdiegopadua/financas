@@ -247,6 +247,20 @@ function expRow(x) {
   </div>`;
 }
 
+// linha de despesa no estilo da lista de entradas (valor à direita + ✓ para pagar)
+function despRow(x) {
+  const c = cat(x.e.cat), late = !x.paid && x.date < today(), soon = !x.paid && !late && daysBetween(today(), x.date) <= (Number(db.settings.daysBefore) || 0);
+  const parc = x.e.mode === 'parcelada' ? `<span class="tag">${x.k + 1}/${x.e.n}</span>` : x.e.mode === 'fixa' ? '<span class="tag">fixa</span>' : '';
+  const when = x.paid ? `<span class="tag ok">pago ${x.paidAt ? fmtDM(x.paidAt) : ''}</span>`
+    : late || soon ? `<span class="tag ${late ? 'late' : 'soon'}">${whenTxt(x.date)}</span>` : `<span>dia ${fmtDate(x.date).slice(0, 5)}</span>`;
+  return `<div class="row ${x.paid ? 'done' : ''}" data-edit-exp="${x.e.id}" data-ym="${x.ym}">
+    <div class="ic" style="color:${c.color}">${c.icon}</div>
+    <div class="mid"><div class="t">${esc(x.e.desc)}</div><div class="sub"><span>${esc(c.name)}</span>${parc}${when}</div></div>
+    <div class="amt">${money(x.value)} <span class="arrow-up">↗</span></div>
+    <button class="chk ${x.paid ? 'on' : ''}" data-pay="${x.e.id}" data-ym="${x.ym}" aria-label="${x.paid ? 'Desmarcar pagamento' : 'Marcar como paga'}">✓</button>
+  </div>`;
+}
+
 function recRow(r) {
   const late = !r.received && r.due && r.due < today();
   return `<div class="row ${r.received ? 'done' : ''}" data-edit-rec="${r.id}">
@@ -393,7 +407,8 @@ function viewDesp() {
     <div class="stat"><div class="lbl">Falta pagar</div><div class="val ${tot - paid > 0 ? 'warn' : 'pos'}">${money(tot - paid)}</div></div></div>
     <div class="seg" style="margin:14px 0 12px">${[['all', 'Todas'], ['pend', `A pagar (${nPend})`], ['paid', 'Pagas']].map(([k, l]) => `<button class="${state.despFilter === k ? 'on' : ''}" data-despf="${k}">${l}</button>`).join('')}</div>`;
   if (used.length > 1) h += `<div class="chips"><button class="chip ${!state.catFilter ? 'on' : ''}" data-cat="">Todos os tipos</button>${used.map(id => `<button class="chip ${state.catFilter === id ? 'on' : ''}" data-cat="${id}">${cat(id).icon} ${esc(cat(id).name)}</button>`).join('')}</div>`;
-  h += list.length ? `<div class="bills">${list.map(billCard).join('')}</div>` : `<div class="glass"><div class="empty"><b>💸</b>Nada por aqui em ${ymLabel(state.ym, true)}.</div></div>`;
+  h += `<section class="sheet"><h2>${ymLabel(state.ym, true).replace(/^./, c => c.toUpperCase())}</h2>
+    ${list.length ? list.map(despRow).join('') : `<div class="empty"><b>💸</b>Nada por aqui em ${ymLabel(state.ym, true)}.</div>`}</section>`;
   return h;
 }
 
