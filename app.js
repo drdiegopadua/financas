@@ -326,6 +326,23 @@ async function connectSheets(url, chave) {
   } catch (e) { toast('Não conectou: ' + (e.message || 'verifique a URL')); }
 }
 
+// link de conexão: .../financas/#conectar=<base64url de {"u":url,"k":chave}>
+// (a parte depois do # nunca é enviada a servidor nenhum)
+function parseConnect(str) {
+  const m = String(str || '').match(/conectar=([A-Za-z0-9_\-+/=]+)/);
+  if (!m) return null;
+  try { const j = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/'))); return j.u && j.k ? j : null; } catch (e) { return null; }
+}
+function connectLink() {
+  const b = btoa(JSON.stringify({ u: sync.url, k: sync.chave })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${location.origin}${location.pathname}#conectar=${b}`;
+}
+async function connectFromText(txt) {
+  const c = parseConnect(txt);
+  if (!c) return toast('Link de conexão inválido');
+  await connectSheets(c.u, c.k);
+}
+
 async function copyScript() {
   if (!sync.chave && !sync.pendingKey) { sync.pendingKey = newKey(); saveSync(); }
   const key = sync.chave || sync.pendingKey;
@@ -586,9 +603,14 @@ function viewCfg() {
     <div class="cfg-row"><span class="n">Status<br><span class="muted" id="syncStatus">${esc(syncLabel())}</span></span>
       <button class="btn sm primary" data-act="gs-sync">↻ Sincronizar</button></div>
     <div class="cfg-row"><span class="n">Chave (use no outro aparelho)<br><span class="muted" style="font-family:monospace;user-select:all">${esc(sync.chave)}</span></span></div>
+    <div class="cfg-row"><span class="n">Conectar outro aparelho<br><span class="muted">Copie o link e abra no outro aparelho</span></span>
+      <button class="btn sm" data-act="gs-link">🔗 Copiar link</button></div>
     <div class="actions" style="margin-top:8px">${sync.sheetUrl ? `<a class="btn" style="text-align:center;text-decoration:none" href="${esc(sync.sheetUrl)}" target="_blank" rel="noopener">📄 Abrir planilha</a>` : ''}<button class="btn danger" data-act="gs-off">Desconectar</button></div>`
     : `
-    <p class="muted" style="margin-top:0">Guarde tudo numa planilha sua no Google Drive e use o app em vários aparelhos. Faça uma vez:</p>
+    <p style="margin:0 0 6px;font-weight:600">Já tem a planilha? Cole o link de conexão:</p>
+    <label class="f gsf" style="margin-top:0"><input id="gsLink" placeholder="https://drdiegopadua.github.io/financas/#conectar=…" autocomplete="off"></label>
+    <div class="actions" style="margin:10px 0 18px"><button class="btn primary" data-act="gs-paste">Conectar com o link</button></div>
+    <p class="muted" style="margin-top:0">Ou crie uma planilha nova (faça uma vez):</p>
     <ol class="steps">
       <li>Crie uma planilha em branco: <a href="https://sheets.new" target="_blank" rel="noopener">sheets.new</a> (dê o nome "Minhas Finanças").</li>
       <li>Na planilha: <b>Extensões → Apps Script</b>. Apague o que tiver e cole o código: <button class="btn sm primary" data-act="gs-copy">📋 Copiar código</button></li>
@@ -862,6 +884,11 @@ function handleClick(e) {
   if (a === 'gs-copy') copyScript();
   if (a === 'gs-connect') connectSheets($('#gsUrl').value, $('#gsKey').value);
   if (a === 'gs-sync') syncNow(true);
+  if (a === 'gs-paste') connectFromText($('#gsLink').value);
+  if (a === 'gs-link') {
+    const l = connectLink();
+    navigator.clipboard.writeText(l).then(() => toast('Link copiado ✓'), () => openModal(`${head('Link de conexão')}<label class="f"><textarea rows="4" readonly>${esc(l)}</textarea></label>`));
+  }
   if (a === 'gs-off' && confirm('Desconectar da planilha? Os dados continuam na planilha e neste aparelho.')) { sync = {}; saveSync(); render(); toast('Planilha desconectada'); }
   if (a === 'export') download(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }), `financas-backup-${today()}.json`);
   if (a === 'import') {
@@ -901,4 +928,9 @@ if (location.hash === '#lembretes') setTimeout(alertsModal, 300);
 render();
 syncReminders();
 notifyDue();
-syncNow();
+const autoConnect = parseConnect(location.hash);
+if (autoConnect) {
+  history.replaceState(null, '', location.pathname); // tira a chave da barra de endereço
+  state.tab = 'cfg'; render();
+  connectSheets(autoConnect.u, autoConnect.k);
+} else syncNow();
