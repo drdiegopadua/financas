@@ -1,10 +1,11 @@
-const CACHE = 'financas-v9';
+const CACHE = 'financas-v10';
 const DATA = 'financas-data';
 const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' = ignora o cache do navegador e baixa a versão nova
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE && k !== DATA).map(k => caches.delete(k))))
@@ -13,8 +14,10 @@ self.addEventListener('activate', e => {
 // rede primeiro (pega atualizações), cache como reserva offline
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  // arquivos do próprio app: sempre confere com o servidor (evita ficar preso numa versão antiga)
+  const own = new URL(e.request.url).origin === self.location.origin;
   e.respondWith(
-    fetch(e.request).then(r => {
+    fetch(own ? e.request.url : e.request, own ? { cache: 'no-cache', credentials: 'same-origin' } : undefined).then(r => {
       if (r.ok || r.type === 'opaque') { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
       return r;
     }).catch(() => caches.match(e.request, { ignoreSearch: true }))

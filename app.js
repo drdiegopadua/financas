@@ -2,6 +2,7 @@
 'use strict';
 
 const KEY = 'financas.v1';
+const APP_VERSION = '10';
 const DEFAULT_CATS = [
   { id: 'moradia', name: 'Moradia', icon: '🏠', color: '#60a5fa' },
   { id: 'alimentacao', name: 'Alimentação', icon: '🍽️', color: '#f97316' },
@@ -806,7 +807,7 @@ function viewCfg() {
     <input type="file" id="importFile" accept="application/json,.json" hidden></div>
   <h2>App</h2><div class="glass">
     ${deferredInstall ? '<div class="actions" style="margin-bottom:10px"><button class="btn primary" data-act="install">📲 Instalar app</button></div>' : ''}
-    <p class="muted" style="margin-top:0">${db.expenses.length} despesas · ${db.incomes.length} entradas · ${db.receivables.length} a receber</p>
+    <p class="muted" style="margin-top:0">${db.expenses.length} despesas · ${db.incomes.length} entradas · ${db.receivables.length} a receber<br>Versão do app: <b>${APP_VERSION}</b></p>
     <div class="actions"><button class="btn danger" data-act="wipe">Apagar todos os dados</button></div></div>`;
 }
 
@@ -1086,6 +1087,7 @@ $('#view').addEventListener('change', e => {
 });
 
 /* ---------- sem zoom com os dedos (o iPhone ignora user-scalable=no) ---------- */
+document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
 ['gesturestart', 'gesturechange', 'gestureend'].forEach(ev => document.addEventListener(ev, e => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
 
@@ -1093,7 +1095,11 @@ document.addEventListener('touchmove', e => { if (e.touches.length > 1 || (e.sca
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; if (state.tab === 'cfg') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  // quando chega uma versão nova do app, recarrega uma vez para já usar ela
+  let reloaded = false;
+  const hadController = !!navigator.serviceWorker.controller; // na 1ª visita não recarrega
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
   navigator.serviceWorker.addEventListener('message', ev => { if (ev.data === 'open-alerts') alertsModal(); });
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); notifyDue(); syncNow(); } });
