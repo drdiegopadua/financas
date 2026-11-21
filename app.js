@@ -580,6 +580,16 @@ function viewRec() {
     ${list.length ? list.map(recRow).join('') : `<div class="empty"><b>🤝</b>${state.recFilter === 'pend' ? 'Ninguém te deve nada por aqui.' : 'Nenhum recebimento ainda.'}</div>`}</section>`;
 }
 
+// mês vazio: avisa se há entradas em outro mês (ex.: salário que começa no mês seguinte)
+function emptyIncome() {
+  for (let i = 1; i <= 12; i++) {
+    const m = addMonths(state.ym, i);
+    if (incomesIn(m).length) return `<div class="empty"><b>📅</b>Nenhuma entrada em ${ymLabel(state.ym, true)}.<br>Suas entradas começam em <b style="display:inline;font-size:inherit">${ymLabel(m, true)}</b>.
+      <div class="actions" style="margin-top:12px"><button class="btn primary" data-goto="${m}">Ver ${ymLabel(m, true)} ›</button></div></div>`;
+  }
+  return '<div class="empty"><b>💰</b>Cadastre seu salário e outras rendas para o app calcular quanto sobra.</div>';
+}
+
 function viewEnt() {
   const s = summary(state.ym);
   const rows = s.incs.map(x => `<div class="row" data-edit-inc="${x.i.id}"><div class="ic">💰</div>
@@ -592,7 +602,7 @@ function viewEnt() {
     <div class="stat"><div class="lbl">Renda do mês</div><div class="val pos">${money(s.renda)}</div></div>
     <div class="stat"><div class="lbl">Recebidos no mês</div><div class="val" style="color:var(--blue)">${money(s.recebido)}</div></div></div>
     <section class="sheet" style="margin-top:16px"><h2>${ymLabel(state.ym, true).replace(/^./, c => c.toUpperCase())}</h2>
-    ${rows.length ? rows.join('') : '<div class="empty"><b>💰</b>Cadastre seu salário e outras rendas para o app calcular quanto sobra.</div>'}</section>`;
+    ${rows.length ? rows.join('') : emptyIncome()}</section>`;
 }
 
 function viewCfg() {
@@ -868,6 +878,7 @@ function handleClick(e) {
   const chip = t.closest('[data-cat]'); if (chip) { state.catFilter = chip.dataset.cat || null; return render(); }
   const rf = t.closest('[data-recf]'); if (rf) { state.recFilter = rf.dataset.recf; return render(); }
   const df = t.closest('[data-despf]'); if (df) { state.despFilter = df.dataset.despf; return render(); }
+  const gm = t.closest('[data-goto]'); if (gm) { state.ym = gm.dataset.goto; return render(); }
   const go = t.closest('[data-tab-go]'); if (go) { state.tab = go.dataset.tabGo; render(); return window.scrollTo(0, 0); }
   const ee = t.closest('[data-edit-exp]'); if (ee) { closeModal(); return expenseForm(db.expenses.find(x => x.id === ee.dataset.editExp), ee.dataset.ym); }
   const er = t.closest('[data-edit-rec]'); if (er) { closeModal(); return recForm(db.receivables.find(x => x.id === er.dataset.editRec)); }
